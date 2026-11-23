@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, isNotNull, isNull, max, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, inArray, isNotNull, isNull, max, ne, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
   CreateSurveyRequest,
@@ -12,6 +12,7 @@ import {
   type Collaborator,
   type Draft,
   type DraftValidation,
+  type ApprovalPending,
   type PublishResult,
   type SaveDraftResult,
   type SurveyDetail,
@@ -23,7 +24,9 @@ import {
 import { createDefinition, remapDefinitionKeys, validateDefinition, type SurveyDefinition } from '@survey/core';
 import { parseDefinition } from '@survey/core/schema';
 import {
+  approvalRequests,
   distributions,
+  folders,
   memberships,
   newId,
   newPublicId,
@@ -49,6 +52,8 @@ import { AppError, conflict, forbidden, notFound, unprocessable } from '../lib/e
 import { decodeCursor, encodeCursor } from '../lib/misc';
 import { testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
+import { emitEvent } from '../events';
+import { approvalSettings, requestApproval, toApprovalRequest } from './approvals';
 import { hashPassword } from './auth';
 
 type SurveyRow = typeof surveys.$inferSelect;
@@ -64,6 +69,30 @@ export function effectiveStatus(s: SurveyRow): {
   return { status: s.status, reason: s.closedReason };
 }
 
+/** Phase 3A: the highest role a user holds on the survey through teams, or null. */
+export const teamRoleSql = (userId: string) => sql<SurveyRole | null>`(
+  select stc.role from survey_team_collaborators stc
+    join team_members tm on tm.team_id = stc.team_id and tm.user_id = ${userId}::uuid
+   where stc.survey_id = ${surveys.id}
+   order by case stc.role when 'editor' then 2 else 1 end desc
+   limit 1)`;
+
+/** The same for each user row of a query over `users`, on one survey. */
+export const teamRoleOfUsersSql = (surveyId: string) => sql<SurveyRole | null>`(
+  select stc.role from survey_team_collaborators stc
+    join team_members tm on tm.team_id = stc.team_id and tm.user_id = ${users.id}
+   where stc.survey_id = ${surveyId}::uuid
+   order by case stc.role when 'editor' then 2 else 1 end desc
+   limit 1)`;
+
+const ROLE_RANK: Record<SurveyRole, number> = { viewer: 1, editor: 2, owner: 3 };
+/** The stronger of a direct share and a team share. */
+export function strongerRole(a: SurveyRole | null, b: SurveyRole | null): SurveyRole | null {
+  if (!a) return b;
+  if (!b) return a;
+  return ROLE_RANK[a] >= ROLE_RANK[b] ? a : b;
+}
+
 /**
  * Load a survey the caller can see and check a capability. Surveys the caller has no role on
  * are reported as 404, so their existence isn't revealed.
@@ -71,14 +100,14 @@ export function effectiveStatus(s: SurveyRow): {
 export async function loadSurvey(tx: Tx, auth: OrgAuth, surveyId: string, capability: SurveyCapability) {
   if (!UUID.test(surveyId)) throw notFound('Survey');
   const [row] = await tx.db
-    .select({ survey: surveys, shared: surveyCollaborators.role })
+    .select({ survey: surveys, shared: surveyCollaborators.role, teamRole: teamRoleSql(auth.userId) })
     .from(surveys)
     .leftJoin(
       surveyCollaborators,
       and(eq(surveyCollaborators.surveyId, surveys.id), eq(surveyCollaborators.userId, auth.userId)),
     )
     .where(and(eq(surveys.id, surveyId), isNull(surveys.deletedAt)));
-  const role = row ? effectiveSurveyRole(auth.orgRole, row.shared) : null;
+  const role = row ? effectiveSurveyRole(auth.orgRole, strongerRole(row.shared, row.teamRole)) : null;
   if (!row || !role) throw notFound('Survey');
   if (!surveyCan(role, capability)) throw forbidden();
   return { survey: row.survey, role };
@@ -109,6 +138,10 @@ async function buildSummaries(
     })
     .from(surveyVersions)
     .where(inArray(surveyVersions.surveyId, ids));
+  const pending = await tx.db
+    .select({ surveyId: approvalRequests.surveyId })
+    .from(approvalRequests)
+    .where(and(inArray(approvalRequests.surveyId, ids), eq(approvalRequests.status, 'pending')));
 
   return rows.map(({ survey: s, role }) => {
     const owner = owners.find((o) => o.surveyId === s.id);
@@ -125,8 +158,80 @@ async function buildSummaries(
       hasDraft: versions.some((v) => v.surveyId === s.id && v.status === 'draft'),
       publicUrl: publicUrl(deps, s),
       updatedAt: s.updatedAt.toISOString(),
+      folderId: s.folderId,
+      pendingApproval: pending.some((p) => p.surveyId === s.id),
     };
   });
+}
+
+async function checkFolder(tx: Tx, folderId: string | null | undefined): Promise<void> {
+  if (!folderId) return;
+  const [folder] = await tx.db.select({ id: folders.id }).from(folders).where(eq(folders.id, folderId));
+  if (!folder) throw unprocessable('invalid_folder', "That folder doesn't exist.");
+}
+
+/** Mark waiting approval requests as out of date (the draft changed or was discarded). */
+export async function retireApprovals(tx: Tx, surveyId: string, status: 'superseded' | 'cancelled'): Promise<void> {
+  await tx.db
+    .update(approvalRequests)
+    .set({ status, decidedAt: new Date() })
+    .where(and(eq(approvalRequests.surveyId, surveyId), eq(approvalRequests.status, 'pending')));
+}
+
+/**
+ * Publish a draft: freeze it, make it current, audit it and emit `survey.published` in the same
+ * transaction. Used by the publish endpoint and by approving an approval request.
+ */
+export async function publishDraft(
+  deps: Deps,
+  tx: Tx,
+  input: {
+    orgId: string;
+    actorId: string;
+    publishedBy: string;
+    survey: SurveyRow;
+    draft: typeof surveyVersions.$inferSelect;
+    ip: string | null;
+    approvalRequestId?: string;
+  },
+) {
+  const { survey, draft } = input;
+  const now = new Date();
+  await tx.db
+    .update(surveyVersions)
+    .set({ status: 'published', publishedBy: input.publishedBy, publishedAt: now, updatedAt: now })
+    .where(eq(surveyVersions.id, draft.id));
+  const [updated] = await tx.db
+    .update(surveys)
+    .set({
+      currentVersionId: draft.id,
+      status: survey.status === 'draft' ? 'live' : survey.status,
+      updatedAt: now,
+    })
+    .where(eq(surveys.id, survey.id))
+    .returning();
+  await audit(tx, {
+    orgId: input.orgId,
+    actorId: input.actorId,
+    action: 'survey.published',
+    entityType: 'survey',
+    entityId: survey.id,
+    metadata: {
+      versionNumber: draft.versionNumber,
+      ...(input.approvalRequestId ? { approvalRequestId: input.approvalRequestId } : {}),
+    },
+    ip: input.ip,
+  });
+  await emitEvent(deps, tx, {
+    orgId: input.orgId,
+    type: 'survey.published',
+    surveyId: survey.id,
+    versionId: draft.id,
+  });
+  return {
+    version: { id: draft.id, versionNumber: draft.versionNumber, publishedAt: now.toISOString() },
+    survey: updated!,
+  };
 }
 
 export async function buildDetail(
@@ -197,7 +302,7 @@ async function publishedDefinitions(tx: Tx, surveyId: string): Promise<SurveyDef
   return rows.map((r) => r.definition);
 }
 
-async function validationFor(
+export async function validationFor(
   tx: Tx,
   survey: SurveyRow,
   definition: SurveyDefinition,
@@ -247,7 +352,13 @@ function parseIfMatch(header: string | undefined): number {
 export async function createSurveyRecords(
   tx: Tx,
   auth: OrgAuth,
-  input: { title: string; definition: SurveyDefinition; anonymous?: boolean; access?: SurveyAccess },
+  input: {
+    title: string;
+    definition: SurveyDefinition;
+    anonymous?: boolean;
+    access?: SurveyAccess;
+    folderId?: string | null;
+  },
 ): Promise<SurveyRow> {
   const surveyId = newId();
   const [survey] = await tx.db
@@ -260,6 +371,7 @@ export async function createSurveyRecords(
       createdBy: auth.userId,
       anonymous: input.anonymous ?? false,
       ...(input.access ? { access: input.access } : {}),
+      folderId: input.folderId ?? null,
     })
     .returning();
   await tx.db.insert(surveyVersions).values({
@@ -296,9 +408,13 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
     const auth = requireOrg(req);
     const query = parse(ListSurveysQuery, req.query);
     return withTenant(pool, auth.orgId, async (tx) => {
+      const teamRole = teamRoleSql(auth.userId);
       const conditions = [isNull(surveys.deletedAt), eq(surveys.isTemplate, false)];
-      if (auth.orgRole !== 'org_admin') conditions.push(isNotNull(surveyCollaborators.role));
+      if (auth.orgRole !== 'org_admin')
+        conditions.push(or(isNotNull(surveyCollaborators.role), sql`${teamRole} is not null`)!);
       if (query.status) conditions.push(eq(surveys.status, query.status));
+      if (query.folderId === 'none') conditions.push(isNull(surveys.folderId));
+      else if (query.folderId) conditions.push(eq(surveys.folderId, query.folderId));
       if (query.q) conditions.push(ilike(surveys.title, `%${query.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`));
       const cursor = decodeCursor(query.cursor, 2);
       if (cursor)
@@ -307,7 +423,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         );
 
       const rows = await tx.db
-        .select({ survey: surveys, shared: surveyCollaborators.role })
+        .select({ survey: surveys, shared: surveyCollaborators.role, teamRole })
         .from(surveys)
         .leftJoin(
           surveyCollaborators,
@@ -320,7 +436,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
       const page = rows.slice(0, query.limit);
       const visible = page.map((r) => ({
         survey: r.survey,
-        role: effectiveSurveyRole(auth.orgRole, r.shared)!,
+        role: effectiveSurveyRole(auth.orgRole, strongerRole(r.shared, r.teamRole))!,
       }));
       const last = page.at(-1);
       return {
@@ -335,11 +451,12 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
 
   app.post('/api/v1/surveys', async (req, reply) => {
     const auth = requireOrg(req, 'surveys.create');
-    const { title, fromTemplate } = parse(CreateSurveyRequest, req.body);
+    const { title, fromTemplate, folderId } = parse(CreateSurveyRequest, req.body);
     const detail = await withTenant(pool, auth.orgId, async (tx) => {
+      await checkFolder(tx, folderId);
       // Fresh keys for everything copied from a template, so no two surveys share keys.
       const definition = fromTemplate ? remapDefinitionKeys(await templateDefinition(tx, fromTemplate)) : createDefinition();
-      const survey = await createSurveyRecords(tx, auth, { title, definition });
+      const survey = await createSurveyRecords(tx, auth, { title, definition, folderId: folderId ?? null });
       await audit(tx, {
         orgId: auth.orgId,
         actorId: auth.userId,
@@ -383,6 +500,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         const [theme] = await tx.db.select({ id: themes.id }).from(themes).where(eq(themes.id, body.themeId));
         if (!theme) throw unprocessable('invalid_theme', "That theme doesn't exist.");
       }
+      await checkFolder(tx, body.folderId);
       let access: SurveyAccess | undefined;
       if (body.access) {
         const { password, ...rest } = body.access;
@@ -396,6 +514,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
           ...(body.anonymous !== undefined ? { anonymous: body.anonymous } : {}),
           ...(access ? { access } : {}),
           ...(body.themeId !== undefined ? { themeId: body.themeId } : {}),
+          ...(body.folderId !== undefined ? { folderId: body.folderId } : {}),
           updatedAt: new Date(),
         })
         .where(eq(surveys.id, survey.id))
@@ -448,6 +567,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         title: body.title ?? `Copy of ${survey.title}`.slice(0, 300),
         definition,
         anonymous: survey.anonymous,
+        folderId: survey.folderId,
         access: { closesAt: null, quota: null, onePerBrowser: readAccess(survey.access).onePerBrowser, captcha: readAccess(survey.access).captcha },
       });
       await audit(tx, {
@@ -484,6 +604,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         entityId: survey.id,
         ip: req.ip,
       });
+      await emitEvent(deps, tx, { orgId: auth.orgId, type: 'survey.closed', surveyId: survey.id, reason: 'manual' });
       return buildDetail(deps, tx, updated!, role);
     });
   });
@@ -621,6 +742,8 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         });
       }
       await tx.db.update(surveys).set({ updatedAt: new Date() }).where(eq(surveys.id, survey.id));
+      // An approval covers one exact revision: any edit makes a waiting request out of date.
+      await retireApprovals(tx, survey.id, 'superseded');
       reply.header('etag', `"rev-${saved.revision}"`);
       return {
         revision: saved.revision,
@@ -644,6 +767,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         .where(and(eq(surveyVersions.surveyId, survey.id), eq(surveyVersions.status, 'draft')))
         .returning({ id: surveyVersions.id });
       if (deleted.length === 0) throw notFound('Draft');
+      await retireApprovals(tx, survey.id, 'cancelled');
       await audit(tx, {
         orgId: auth.orgId,
         actorId: auth.userId,
@@ -656,9 +780,9 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
     return reply.code(204).send();
   });
 
-  app.post<IdParams>('/api/v1/surveys/:id/publish', async (req): Promise<PublishResult> => {
+  app.post<IdParams>('/api/v1/surveys/:id/publish', async (req, reply): Promise<PublishResult | ApprovalPending> => {
     const auth = requireOrg(req);
-    const { revision } = parse(PublishRequest, req.body);
+    const { revision, note } = parse(PublishRequest, req.body);
     return withTenant(pool, auth.orgId, async (tx) => {
       const { survey, role } = await loadSurvey(tx, auth, req.params.id, 'survey.publish');
       await tx.client.query('select 1 from surveys where id = $1 for update', [survey.id]);
@@ -681,33 +805,24 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
           errors.map((e) => ({ path: e.path, code: e.code, message: e.message })),
         );
 
-      const now = new Date();
-      await tx.db
-        .update(surveyVersions)
-        .set({ status: 'published', publishedBy: auth.userId, publishedAt: now, updatedAt: now })
-        .where(eq(surveyVersions.id, draft.id));
-      const [updated] = await tx.db
-        .update(surveys)
-        .set({
-          currentVersionId: draft.id,
-          status: survey.status === 'draft' ? 'live' : survey.status,
-          updatedAt: now,
-        })
-        .where(eq(surveys.id, survey.id))
-        .returning();
-      await audit(tx, {
+      // Phase 3A: with approvals on, publishing asks an approver instead (202).
+      if ((await approvalSettings(tx, auth.orgId)).approvalRequired) {
+        const request = await requestApproval(deps, tx, { auth, survey, draft, note: note ?? null, ip: req.ip });
+        reply.code(202);
+        return { approvalRequest: await toApprovalRequest(tx, auth, request) };
+      }
+      const published = await publishDraft(deps, tx, {
         orgId: auth.orgId,
         actorId: auth.userId,
-        action: 'survey.published',
-        entityType: 'survey',
-        entityId: survey.id,
-        metadata: { versionNumber: draft.versionNumber },
+        publishedBy: auth.userId,
+        survey,
+        draft,
         ip: req.ip,
       });
       return {
-        version: { id: draft.id, versionNumber: draft.versionNumber, publishedAt: now.toISOString() },
-        survey: await buildDetail(deps, tx, updated!, role),
-        publicUrl: publicUrl(deps, updated!)!,
+        version: published.version,
+        survey: await buildDetail(deps, tx, published.survey, role),
+        publicUrl: publicUrl(deps, published.survey)!,
       };
     });
   });

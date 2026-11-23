@@ -1,3 +1,4 @@
+import { createHash, hkdfSync } from 'node:crypto';
 import { loadRootEnv } from '@survey/db';
 import type { S3Settings } from './infra/storage';
 
@@ -30,6 +31,25 @@ export interface Config {
   sesTopicArns: string[];
   /** Anonymous surveys: filtered results for fewer responses than this are hidden. */
   minGroupSize: number;
+  /** Phase 3A: AES-256 key for secrets the app must read back (webhook secrets, integration tokens). */
+  encryptionKey: Buffer;
+  /**
+   * Phase 3A: let webhooks and integrations call private and loopback addresses. Only for local
+   * development and tests: in production every outgoing call is checked against private ranges (SSRF).
+   */
+  allowPrivateUrls: boolean;
+  /** Phase 3A: requests per minute per API key. */
+  apiKeyRequestsPerMinute: number;
+}
+
+/**
+ * DATA_ENCRYPTION_KEY is required in production. Elsewhere it falls back to a key derived from
+ * SESSION_SECRET, so existing .env files keep working.
+ */
+function encryptionKeyFrom(raw: string | null, sessionSecret: string, env: Config['env']): Buffer {
+  if (raw) return createHash('sha256').update(raw).digest();
+  if (env === 'production') throw new Error('DATA_ENCRYPTION_KEY must be set in production');
+  return Buffer.from(hkdfSync('sha256', sessionSecret, 'survey-data-key', 'aes-256-gcm', 32));
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -76,13 +96,19 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     emailsPerOrgPerDay: Number(get('EMAILS_PER_ORG_PER_DAY', '10000')),
     sesTopicArns: (opt('SES_SNS_TOPIC_ARNS') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     minGroupSize: Number(get('ANONYMOUS_MIN_GROUP_SIZE', '5')),
+    encryptionKey: Buffer.alloc(0),
+    allowPrivateUrls: get('ALLOW_PRIVATE_WEBHOOK_URLS', env === 'development' ? 'true' : 'false') === 'true',
+    apiKeyRequestsPerMinute: Number(get('API_KEY_REQUESTS_PER_MINUTE', '600')),
     ...overrides,
   };
+  if (!overrides.encryptionKey)
+    config.encryptionKey = encryptionKeyFrom(opt('DATA_ENCRYPTION_KEY'), config.sessionSecret, env);
 
   if (config.sessionSecret.length < 32) throw new Error('SESSION_SECRET must be at least 32 characters');
   if (config.env === 'production') {
     if (!config.cookieSecure) throw new Error('COOKIE_SECURE must be true in production');
     if (config.scanner !== 'clamav') throw new Error('MALWARE_SCANNER must be clamav in production: uploads must be scanned');
+    if (config.allowPrivateUrls) throw new Error('ALLOW_PRIVATE_WEBHOOK_URLS must not be true in production');
   }
   return config;
 }

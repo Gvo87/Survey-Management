@@ -20,6 +20,7 @@ import { renderPdfReport } from '../lib/pdf-report';
 import { nextRun } from '../lib/time';
 import { exportRows } from '../modules/export-data';
 import { computeSummary } from '../modules/results';
+import { strongerRole, teamRoleOfUsersSql } from '../modules/surveys';
 
 type SurveyRow = typeof surveys.$inferSelect;
 const KEEP_DAYS = 7;
@@ -182,14 +183,21 @@ export function exportJobs(deps: Deps) {
           // Recipients are re-checked on every run: people who left the org or lost access get nothing.
           const people = report.recipientIds.length
             ? await tx.db
-                .select({ id: users.id, email: users.email, name: users.name, role: memberships.role, shared: surveyCollaborators.role })
+                .select({
+                  id: users.id,
+                  email: users.email,
+                  name: users.name,
+                  role: memberships.role,
+                  shared: surveyCollaborators.role,
+                  teamRole: teamRoleOfUsersSql(survey.id),
+                })
                 .from(users)
                 .innerJoin(memberships, and(eq(memberships.userId, users.id), eq(memberships.orgId, orgId)))
                 .leftJoin(surveyCollaborators, and(eq(surveyCollaborators.userId, users.id), eq(surveyCollaborators.surveyId, survey.id)))
                 .where(inArray(users.id, report.recipientIds))
             : [];
           const allowed = people.filter((p) => {
-            const role = effectiveSurveyRole(p.role, p.shared ?? null);
+            const role = effectiveSurveyRole(p.role, strongerRole(p.shared ?? null, p.teamRole));
             return role && surveyCan(role, 'responses.view');
           });
           const exportId = newId();

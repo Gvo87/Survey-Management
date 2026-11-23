@@ -1,10 +1,13 @@
 import PgBoss from 'pg-boss';
 import type { QueueName, Tx } from '@survey/db';
+import type { DomainEvent } from '../events';
 
 export type EmailJob =
   | { type: 'verify_email'; userId: string }
   | { type: 'password_reset'; userId: string }
-  | { type: 'invitation'; orgId: string; invitationId: string };
+  | { type: 'invitation'; orgId: string; invitationId: string }
+  /** Phase 3A: a notification that a user receives by email. */
+  | { type: 'notification'; orgId: string; notificationId: string };
 
 export interface JobPayloads {
   'email.send': EmailJob;
@@ -23,6 +26,12 @@ export interface JobPayloads {
   'exports.generate': { orgId: string; exportId: string };
   'exports.cleanup': Record<string, never>;
   'reports.tick': Record<string, never>;
+  /** Phase 3A: fan an event out to webhooks and notification rules. */
+  'events.dispatch': DomainEvent;
+  /** `manual`: a redelivery or test, one attempt and no retries. */
+  'webhooks.deliver': { orgId: string; deliveryId: string; manual?: boolean };
+  'integrations.slack': { orgId: string; text: string };
+  'platform.cleanup': Record<string, never>;
 }
 
 /**

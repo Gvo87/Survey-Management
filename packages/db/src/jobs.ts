@@ -15,6 +15,10 @@ export const QUEUES = {
   generateExport: 'exports.generate',
   cleanupExports: 'exports.cleanup',
   scheduledReportsTick: 'reports.tick',
+  dispatchEvent: 'events.dispatch',
+  deliverWebhook: 'webhooks.deliver',
+  postToSlack: 'integrations.slack',
+  cleanupPlatform: 'platform.cleanup',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

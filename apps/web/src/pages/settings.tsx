@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Invitation, Member, Org, OrgRole, PageResult } from '@survey/contracts';
 import { del, errorMessage, get, patch, post } from '../api';
 import { useAuth } from '../auth';
-import { Alert, Button, Card, ConfirmDialog, PageHeader, SelectField, TextField } from '../components/ui';
+import { Alert, Button, Card, Checkbox, ConfirmDialog, PageHeader, SelectField, TextField } from '../components/ui';
 import { formatDate, relativeTime } from '../lib/format';
 
 const ROLES: { value: OrgRole; label: string; description: string }[] = [
@@ -261,7 +261,7 @@ export function OrgSettingsPage() {
         >
           <TextField label="Organization name" value={value} onChange={(e) => setName(e.target.value)} />
           <p className="text-xs text-muted">
-            Plan: {org.data?.plan ?? '-'}. Branding, data retention and SSO arrive in later phases.
+            Plan: {org.data?.plan ?? '-'}. Data retention and SSO arrive in a later phase.
           </p>
           {save.isSuccess ? <Alert tone="success">Saved.</Alert> : null}
           {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
@@ -276,6 +276,60 @@ export function OrgSettingsPage() {
           </Button>
         </form>
       </Card>
+      {org.data ? <ApprovalSettings org={org.data} /> : null}
     </>
+  );
+}
+
+/** Phase 3A: require approval before publishing, and choose who besides admins can approve. */
+function ApprovalSettings({ org }: { org: Org }) {
+  const queryClient = useQueryClient();
+  const members = useQuery({ queryKey: ['members'], queryFn: () => get<PageResult<Member>>('/org/members') });
+  const [required, setRequired] = useState(org.approvalRequired);
+  const [approvers, setApprovers] = useState(new Set(org.approverIds));
+  const save = useMutation({
+    mutationFn: () => patch<Org>('/org', { approvalRequired: required, approverIds: [...approvers] }),
+    onSuccess: (data) => queryClient.setQueryData(['org'], data),
+  });
+  const candidates = (members.data?.data ?? []).filter((m) => m.role === 'creator');
+  return (
+    <Card className="mt-6 max-w-xl" title="Approval before publishing">
+      <div className="flex flex-col gap-4">
+        <Checkbox
+          label="Require approval to publish"
+          hint="Publishing sends the exact draft to an approver. It goes live only when someone else approves it, and any edit makes the request out of date."
+          checked={required}
+          onChange={(e) => setRequired(e.target.checked)}
+        />
+        <fieldset className="flex flex-col gap-2">
+          <legend className="mb-1 text-sm font-medium">Approvers</legend>
+          <p className="text-xs text-muted">
+            Admins can always approve. Creators chosen here can approve surveys shared with them. Nobody approves their own request.
+          </p>
+          {candidates.length === 0 ? <p className="text-sm text-muted">No creators in this organization.</p> : null}
+          {candidates.map((m) => (
+            <Checkbox
+              key={m.userId}
+              label={m.name}
+              hint={m.email}
+              checked={approvers.has(m.userId)}
+              onChange={() =>
+                setApprovers((current) => {
+                  const next = new Set(current);
+                  if (next.has(m.userId)) next.delete(m.userId);
+                  else next.add(m.userId);
+                  return next;
+                })
+              }
+            />
+          ))}
+        </fieldset>
+        {save.isSuccess ? <Alert tone="success">Saved.</Alert> : null}
+        {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
+        <Button variant="primary" className="self-start" busy={save.isPending} onClick={() => save.mutate()}>
+          Save approval settings
+        </Button>
+      </div>
+    </Card>
   );
 }

@@ -21,6 +21,9 @@ import { campaignJobs } from './campaigns';
 import { publishLiveEvent } from '../modules/live';
 import { importContacts } from './import-contacts';
 import { exportJobs } from './exports';
+import { emitEvent } from '../events';
+import { deliverWebhook, dispatchEvent } from './events';
+import { postToSlack, sendNotificationEmail } from './notifications';
 
 export type JobHandlers = { [Q in QueueName]: (data: JobPayloads[Q]) => Promise<void> };
 
@@ -32,6 +35,7 @@ const HOUR = 3600 * 1000;
  */
 async function sendEmail(deps: Deps, job: EmailJob): Promise<void> {
   const { appUrl } = deps.config;
+  if (job.type === 'notification') return sendNotificationEmail(deps, job);
 
   if (job.type === 'verify_email' || job.type === 'password_reset') {
     const message = await withGlobal(deps.pool, async (tx) => {
@@ -127,16 +131,17 @@ export function createJobHandlers(deps: Deps): JobHandlers {
         tx.client.query<{ org_id: string; survey_id: string }>('select * from close_expired_surveys()'),
       );
       for (const row of rows) {
-        await withTenant(pool, row.org_id, (tx) =>
-          audit(tx, {
+        await withTenant(pool, row.org_id, async (tx) => {
+          await audit(tx, {
             orgId: row.org_id,
             actorId: null,
             action: 'survey.closed',
             entityType: 'survey',
             entityId: row.survey_id,
             metadata: { reason: 'close_date' },
-          }),
-        );
+          });
+          await emitEvent(deps, tx, { orgId: row.org_id, type: 'survey.closed', surveyId: row.survey_id, reason: 'close_date' });
+        });
       }
     },
 
@@ -190,6 +195,12 @@ export function createJobHandlers(deps: Deps): JobHandlers {
     },
 
     'contacts.import': ({ orgId, importId }) => importContacts(deps, orgId, importId),
+    'events.dispatch': (event) => dispatchEvent(deps, event),
+    'webhooks.deliver': async (job) => void (await deliverWebhook(deps, job)),
+    'integrations.slack': (job) => postToSlack(deps, job),
+    'platform.cleanup': async () => {
+      await withGlobal(pool, (tx) => tx.client.query('select purge_platform_records($1)', [new Date()]));
+    },
     ...campaignJobs(deps),
     ...exportJobs(deps),
   };

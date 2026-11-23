@@ -17,7 +17,7 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import type { BankItem, PublishResult, SurveyDetail, Theme, VersionDetail, VersionSummary } from '@survey/contracts';
+import type { ApprovalPending, BankItem, Org, PublishResult, SurveyDetail, Theme, VersionDetail, VersionSummary } from '@survey/contracts';
 import {
   QUESTION_TYPES,
   QUESTION_TYPE_META,
@@ -43,6 +43,7 @@ import {
   TextField,
   cx,
 } from '../../../components/ui';
+import { CommentsPanel } from '../Comments';
 import { useSurvey } from '../SurveyLayout';
 import {
   addPage,
@@ -192,7 +193,7 @@ function Editor({
   const [selected, setSelected] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(true);
   const [device, setDevice] = useState<'desktop' | 'mobile'>('mobile');
-  const [dialog, setDialog] = useState<null | 'settings' | 'publish' | 'problems' | 'discard' | 'logic'>(null);
+  const [dialog, setDialog] = useState<null | 'settings' | 'publish' | 'problems' | 'discard' | 'logic' | 'comments'>(null);
   const theme = usePreviewTheme(survey);
   const [confirmDelete, setConfirmDelete] = useState<{ kind: 'element' | 'page'; key: string } | null>(null);
 
@@ -264,6 +265,9 @@ function Editor({
           <Button size="sm" onClick={() => setDialog('logic')}>
             Logic map
           </Button>
+          <Button size="sm" onClick={() => setDialog('comments')}>
+            Comments
+          </Button>
           <Button size="sm" onClick={() => setDialog('settings')}>
             Survey settings
           </Button>
@@ -287,6 +291,11 @@ function Editor({
               Discard draft
             </Button>
           </div>
+        </Alert>
+      ) : null}
+      {survey.pendingApproval ? (
+        <Alert tone="warning">
+          Waiting for approval. Editing the draft withdraws the request, so the approver always reviews exactly what you sent.
         </Alert>
       ) : null}
       {d.conflict ? (
@@ -382,6 +391,20 @@ function Editor({
           select(key);
         }}
       />
+      <Dialog
+        open={dialog === 'comments'}
+        onClose={() => setDialog(null)}
+        title={selected ? 'Comments on the selected item' : 'Comments on the survey'}
+        wide
+      >
+        <p className="mb-3 text-sm text-muted">
+          {selected ? 'Select nothing to comment on the survey as a whole. ' : 'Select a question or page to comment on it. '}
+          <Link to={`/surveys/${survey.id}/comments`} className="text-brand-700 underline">
+            See every comment
+          </Link>
+        </p>
+        <CommentsPanel survey={survey} definition={definition} onlyAnchor={selected} />
+      </Dialog>
       <ProblemsDialog
         open={dialog === 'problems'}
         onClose={() => setDialog(null)}
@@ -1272,7 +1295,12 @@ function PublishDialog({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [serverErrors, setServerErrors] = useState<string[]>([]);
+  const [note, setNote] = useState('');
+  const [sent, setSent] = useState(false);
   const next = (survey.currentVersionNumber ?? 0) + 1;
+  // Phase 3A: with approvals on, publishing sends the draft for review instead.
+  const org = useQuery({ queryKey: ['org'], queryFn: () => get<Org>('/org'), enabled: open });
+  const needsApproval = org.data?.approvalRequired ?? false;
 
   const publish = async () => {
     setBusy(true);
@@ -1280,7 +1308,15 @@ function PublishDialog({
     setServerErrors([]);
     try {
       if (!(await d.flush())) throw new Error('Your latest changes could not be saved. Resolve that first.');
-      await post<PublishResult>(`/surveys/${survey.id}/publish`, { revision: d.revision() });
+      const result = await post<PublishResult | ApprovalPending>(`/surveys/${survey.id}/publish`, {
+        revision: d.revision(),
+        ...(note.trim() ? { note: note.trim() } : {}),
+      });
+      if ('approvalRequest' in result) {
+        setSent(true);
+        onPublished();
+        return;
+      }
       d.markPublished();
       onPublished();
       onClose();
@@ -1296,18 +1332,38 @@ function PublishDialog({
   return (
     <Dialog
       open={open}
-      onClose={onClose}
-      title={survey.currentVersionNumber ? `Publish version ${next}?` : 'Publish survey?'}
+      onClose={() => {
+        setSent(false);
+        onClose();
+      }}
+      title={needsApproval ? 'Send for approval?' : survey.currentVersionNumber ? `Publish version ${next}?` : 'Publish survey?'}
       footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" busy={busy} disabled={errors.length > 0} onClick={() => void publish()}>
-            Publish
+        sent ? (
+          <Button
+            variant="primary"
+            onClick={() => {
+              setSent(false);
+              onClose();
+            }}
+          >
+            Done
           </Button>
-        </>
+        ) : (
+          <>
+            <Button onClick={onClose}>Cancel</Button>
+            <Button variant="primary" busy={busy} disabled={errors.length > 0} onClick={() => void publish()}>
+              {needsApproval ? 'Send for approval' : 'Publish'}
+            </Button>
+          </>
+        )
       }
     >
-      {errors.length ? (
+      {sent ? (
+        <Alert tone="success">
+          Sent for approval. An approver will review this exact draft; you'll be notified when they decide. Editing the draft withdraws
+          the request.
+        </Alert>
+      ) : errors.length ? (
         <Alert tone="error">
           Fix {errors.length === 1 ? 'this problem' : `these ${errors.length} problems`} first:
           <ul className="mt-2 list-disc pl-5">
@@ -1316,7 +1372,7 @@ function PublishDialog({
             ))}
           </ul>
         </Alert>
-      ) : survey.currentVersionNumber ? (
+      ) : needsApproval ? null : survey.currentVersionNumber ? (
         <p className="text-sm">
           New respondents will get version {next}. People who already started keep version{' '}
           {survey.currentVersionNumber}, and their answers stay linked to it.
@@ -1327,6 +1383,12 @@ function PublishDialog({
           into a new version.
         </p>
       )}
+      {needsApproval && !sent && !errors.length ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <p className="text-sm text-muted">Your organization requires approval: it goes live when an approver approves it.</p>
+          <TextArea label="Note for the approver (optional)" rows={2} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} />
+        </div>
+      ) : null}
       {problem ? (
         <Alert tone="error" className="mt-3">
           {problem}

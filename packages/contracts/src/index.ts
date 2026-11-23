@@ -56,7 +56,12 @@ export interface Me {
 }
 
 // ── Organization ─────────────────────────────────────────────────────────────
-export const UpdateOrgRequest = z.object({ name: Name });
+export const UpdateOrgRequest = z.object({
+  name: Name.optional(),
+  /** Phase 3A: publishing needs approval by an org admin or a designated approver. */
+  approvalRequired: z.boolean().optional(),
+  approverIds: z.array(z.uuid()).max(50).optional(),
+});
 export const UpdateMemberRequest = z.object({ role: z.enum(ORG_ROLES) });
 export const CreateInvitationRequest = z.object({ email: Email, role: z.enum(ORG_ROLES) });
 export const AcceptInvitationRequest = z.object({ name: Name.optional(), password: Password.optional() });
@@ -66,6 +71,9 @@ export interface Org {
   name: string;
   slug: string;
   plan: string;
+  /** Phase 3A. */
+  approvalRequired: boolean;
+  approverIds: string[];
 }
 export interface Member {
   userId: string;
@@ -109,21 +117,31 @@ export const AccessSettingsUpdate = AccessSettings.partial().extend({
 export const CreateSurveyRequest = z.object({
   title: z.string().trim().min(1).max(300),
   fromTemplate: z.object({ kind: z.enum(['global', 'org']), id: z.uuid() }).optional(),
+  /** Phase 3A. */
+  folderId: z.uuid().optional(),
 });
 export const UpdateSurveyRequest = z.object({
   title: z.string().trim().min(1).max(300).optional(),
   anonymous: z.boolean().optional(),
   access: AccessSettingsUpdate.optional(),
   themeId: z.uuid().nullable().optional(),
+  /** Phase 3A: null moves the survey out of any folder. */
+  folderId: z.uuid().nullable().optional(),
 });
 export const DuplicateSurveyRequest = z.object({ title: z.string().trim().min(1).max(300).optional() });
 export const SaveDraftRequest = z.object({ definition: z.unknown() });
-export const PublishRequest = z.object({ revision: z.number().int().min(0) });
+export const PublishRequest = z.object({
+  revision: z.number().int().min(0),
+  /** Phase 3A: shown to approvers when the org requires approval. */
+  note: z.string().trim().max(1000).optional(),
+});
 export const SetCollaboratorRequest = z.object({ role: z.enum(SURVEY_ROLES) });
 export const TransferSurveyRequest = z.object({ userId: z.uuid() });
 export const ListSurveysQuery = z.object({
   status: z.enum(SURVEY_STATUSES).optional(),
   q: z.string().trim().max(200).optional(),
+  /** Phase 3A: a folder id, or `none` for surveys outside every folder. */
+  folderId: z.union([z.uuid(), z.literal('none')]).optional(),
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -140,6 +158,10 @@ export interface SurveySummary {
   hasDraft: boolean;
   publicUrl: string | null;
   updatedAt: string;
+  /** Phase 3A. */
+  folderId: string | null;
+  /** Phase 3A: a publish waiting for approval. */
+  pendingApproval: boolean;
 }
 
 export interface SurveyDetail extends SurveySummary {
@@ -844,3 +866,288 @@ export const RecipientsQuery = z.object({
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+// ── Phase 3A: folders and teams ──────────────────────────────────────────────
+export const SaveFolderRequest = z.object({
+  name: z.string().trim().min(1, 'Enter a name.').max(100),
+  /** null or absent: top level. Folders nest at most 3 levels. */
+  parentId: z.uuid().nullable().optional(),
+});
+export interface Folder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  depth: number;
+  /** Surveys directly in this folder that the caller can see. */
+  surveyCount: number;
+}
+
+export const SaveTeamRequest = z.object({ name: z.string().trim().min(1, 'Enter a name.').max(100) });
+export const SetTeamMembersRequest = z.object({ userIds: z.array(z.uuid()).max(500) });
+export interface Team {
+  id: string;
+  name: string;
+  members: { id: string; name: string; email: string; role: OrgRole }[];
+  createdAt: string;
+}
+export const TEAM_SHARE_ROLES = ['editor', 'viewer'] as const;
+export const SetTeamShareRequest = z.object({ role: z.enum(TEAM_SHARE_ROLES) });
+export interface TeamShare {
+  team: { id: string; name: string; memberCount: number };
+  role: (typeof TEAM_SHARE_ROLES)[number];
+}
+
+// ── Phase 3A: comments on drafts ─────────────────────────────────────────────
+export const CreateCommentRequest = z.object({
+  body: z.string().trim().min(1, 'Write a comment.').max(5000),
+  /** A question or page key; absent or null for the survey as a whole. Replies inherit their thread's. */
+  anchorKey: z.string().max(40).nullable().optional(),
+  parentId: z.uuid().optional(),
+});
+export const UpdateCommentRequest = z.object({
+  body: z.string().trim().min(1).max(5000).optional(),
+  resolved: z.boolean().optional(),
+});
+export interface Comment {
+  id: string;
+  anchorKey: string | null;
+  parentId: string | null;
+  author: { id: string; name: string } | null;
+  body: string;
+  createdAt: string;
+  editedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  /** The caller wrote it (and can edit or delete it). */
+  mine: boolean;
+}
+
+// ── Phase 3A: approvals ──────────────────────────────────────────────────────
+export const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'superseded', 'cancelled'] as const;
+export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
+export const DecideApprovalRequest = z.object({ note: z.string().trim().max(1000).optional() });
+export const ListApprovalsQuery = z.object({
+  status: z.enum(APPROVAL_STATUSES).optional(),
+  surveyId: z.uuid().optional(),
+});
+export interface ApprovalRequest {
+  id: string;
+  survey: { id: string; title: string };
+  /** The draft revision that was reviewed; approving publishes exactly this. */
+  revision: number;
+  status: ApprovalStatus;
+  requestedBy: { id: string; name: string };
+  requestNote: string | null;
+  decidedBy: { id: string; name: string } | null;
+  decisionNote: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+  /** The caller may approve or reject it (an admin or designated approver who didn't request it). */
+  canDecide: boolean;
+}
+/** `POST /surveys/{id}/publish` answers 202 with this when the org requires approval. */
+export interface ApprovalPending {
+  approvalRequest: ApprovalRequest;
+}
+
+// ── Phase 3A: notifications ──────────────────────────────────────────────────
+export const NOTIFICATION_KINDS = ['new_response', 'nps_detractor', 'threshold', 'closing'] as const;
+export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
+export const NOTIFICATION_CHANNELS = ['email', 'in_app', 'slack'] as const;
+export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];
+export const NotificationRuleSchema = z.object({
+  kind: z.enum(NOTIFICATION_KINDS),
+  config: z
+    .object({
+      /** nps_detractor: the NPS question to watch (a score of 0-6 is a detractor). */
+      questionKey: z.string().max(40).optional(),
+      /** threshold: fires once when this many responses are complete. */
+      count: z.number().int().min(1).max(10_000_000).optional(),
+    })
+    .default({}),
+  channels: z.array(z.enum(NOTIFICATION_CHANNELS)).min(1, 'Choose at least one channel.').max(3),
+});
+export const SaveNotificationRulesRequest = z.object({ rules: z.array(NotificationRuleSchema).max(20) });
+export type NotificationRuleInput = z.infer<typeof NotificationRuleSchema>;
+export interface NotificationRule extends NotificationRuleInput {
+  id: string;
+}
+export interface AppNotification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  link: string | null;
+  createdAt: string;
+  readAt: string | null;
+}
+export interface NotificationInbox extends PageResult<AppNotification> {
+  unread: number;
+}
+export const NotificationsQuery = z.object({
+  unread: z.stringbool().optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+export const MarkNotificationsReadRequest = z
+  .object({ ids: z.array(z.uuid()).min(1).max(200).optional(), all: z.literal(true).optional() })
+  .refine((v) => Boolean(v.ids) !== Boolean(v.all), 'Send either ids or all.');
+export const NotificationPreferencesSchema = z.object({
+  /** kind → the channels you accept. A kind that's absent accepts every channel. */
+  channels: z.partialRecord(z.enum(NOTIFICATION_KINDS), z.array(z.enum(['email', 'in_app'])).max(2)),
+});
+export type NotificationPreferences = z.infer<typeof NotificationPreferencesSchema>;
+
+// ── Phase 3A: public API keys ────────────────────────────────────────────────
+export const API_SCOPES = [
+  'surveys:read',
+  'surveys:write',
+  'responses:read',
+  'responses:delete',
+  'contacts:read',
+  'contacts:write',
+  'webhooks:manage',
+] as const;
+export type ApiScope = (typeof API_SCOPES)[number];
+export const CreateApiKeyRequest = z.object({
+  name: z.string().trim().min(1, 'Enter a name.').max(100),
+  scopes: z.array(z.enum(API_SCOPES)).min(1, 'Choose at least one scope.'),
+  expiresAt: IsoDateTime.nullable().optional(),
+});
+export interface ApiKey {
+  id: string;
+  name: string;
+  /** The start of the key, to recognise it. The full key is shown only once. */
+  prefix: string;
+  scopes: ApiScope[];
+  createdBy: { id: string; name: string } | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+export interface CreatedApiKey extends ApiKey {
+  /** `sk_live_…`. Store it now: it can't be shown again. */
+  key: string;
+}
+
+// ── Phase 3A: outgoing webhooks ──────────────────────────────────────────────
+export const WEBHOOK_EVENTS = ['response.submitted', 'survey.published', 'survey.closed'] as const;
+export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+const WebhookUrl = z
+  .string()
+  .trim()
+  .max(2000)
+  .pipe(z.url({ protocol: /^https?$/, error: 'Enter an http:// or https:// URL.' }));
+export const CreateWebhookRequest = z.object({
+  url: WebhookUrl,
+  events: z.array(z.enum(WEBHOOK_EVENTS)).min(1, 'Choose at least one event.'),
+  /** Only these surveys; null or absent for every survey. */
+  surveyIds: z.array(z.uuid()).min(1).max(100).nullable().optional(),
+  description: z.string().trim().max(300).optional(),
+});
+export const UpdateWebhookRequest = CreateWebhookRequest.partial().extend({ active: z.boolean().optional() });
+export interface Webhook {
+  id: string;
+  url: string;
+  description: string | null;
+  events: WebhookEvent[];
+  surveyIds: string[] | null;
+  active: boolean;
+  /** Events in a row that failed every attempt; 50 disables the endpoint. */
+  consecutiveFailures: number;
+  disabledReason: string | null;
+  /** After a rotation, the previous secret also signs until this time. */
+  previousSecretExpiresAt: string | null;
+  createdAt: string;
+}
+export interface CreatedWebhook extends Webhook {
+  /** `whsec_…`. Shown once: use it to verify the Survey-Webhook-Signature header. */
+  secret: string;
+}
+export const DELIVERY_STATUSES = ['pending', 'succeeded', 'failed'] as const;
+export const DeliveriesQuery = z.object({
+  status: z.enum(DELIVERY_STATUSES).optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+export interface WebhookDelivery {
+  id: string;
+  eventId: string;
+  eventType: string;
+  status: (typeof DELIVERY_STATUSES)[number];
+  attempts: number;
+  httpStatus: number | null;
+  createdAt: string;
+  nextAttemptAt: string | null;
+}
+export interface WebhookAttempt {
+  attempt: number;
+  manual: boolean;
+  httpStatus: number | null;
+  error: string | null;
+  durationMs: number;
+  responseSnippet: string | null;
+  createdAt: string;
+}
+export interface WebhookDeliveryDetail extends WebhookDelivery {
+  payload: unknown;
+  attemptLog: WebhookAttempt[];
+}
+export interface WebhookTestResult {
+  deliveryId: string;
+  httpStatus: number | null;
+  durationMs: number;
+  error: string | null;
+}
+
+// ── Phase 3A: integrations ───────────────────────────────────────────────────
+export const INTEGRATION_KINDS = ['slack', 'hubspot', 'google_sheets'] as const;
+export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
+export const SlackIntegrationRequest = z.object({
+  webhookUrl: z.string().trim().max(500).pipe(z.url({ protocol: /^https?$/ })),
+  channelName: z.string().trim().max(80).optional(),
+});
+export const HubspotIntegrationRequest = z.object({
+  /** A HubSpot private-app access token. */
+  accessToken: z.string().trim().min(10).max(500),
+  /** The email question whose answer identifies the contact. */
+  emailQuestionKey: z.string().max(40).optional(),
+});
+export const GoogleSheetsIntegrationRequest = z.object({
+  spreadsheetId: z.string().trim().min(10).max(200),
+  sheetName: z.string().trim().min(1).max(100).default('Responses'),
+  accessToken: z.string().trim().min(10).max(4000),
+});
+export interface Integration {
+  kind: IntegrationKind;
+  connected: boolean;
+  status: 'connected' | 'error' | null;
+  /** Non-secret details, e.g. the Slack channel. */
+  summary: Record<string, string>;
+  lastError: string | null;
+  updatedAt: string | null;
+  /** HubSpot and Google Sheets are defined but don't sync yet (Phase 3A stubs). */
+  stub: boolean;
+}
+
+// ── Phase 3A: audit log ──────────────────────────────────────────────────────
+export const AuditLogQuery = z.object({
+  action: z.string().trim().max(100).optional(),
+  actorId: z.uuid().optional(),
+  entityType: z.string().trim().max(50).optional(),
+  entityId: z.uuid().optional(),
+  from: IsoDateTime.optional(),
+  to: IsoDateTime.optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export interface AuditEntry {
+  id: number;
+  createdAt: string;
+  action: string;
+  actor: { type: 'user' | 'api_key' | 'system'; id: string | null; name: string | null };
+  entityType: string | null;
+  entityId: string | null;
+  metadata: Record<string, unknown>;
+}

@@ -66,7 +66,11 @@ const burnTime = (password: string) => {
   return dummyHash.then((h) => verify(h, password)).then(() => false);
 };
 
-export const isUniqueViolation = (error: unknown) => (error as { code?: string }).code === '23505';
+/** Postgres unique violation, also when Drizzle wraps the driver error (DrizzleQueryError.cause). */
+export const isUniqueViolation = (error: unknown): boolean => {
+  const e = error as { code?: string; cause?: { code?: string } };
+  return e.code === '23505' || e.cause?.code === '23505';
+};
 
 export async function startSession(deps: Deps, reply: FastifyReply, token: string): Promise<Me> {
   reply.setCookie(sessionCookieName(deps.config), token, sessionCookieOptions(deps.config));

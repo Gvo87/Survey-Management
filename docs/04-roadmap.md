@@ -10,13 +10,18 @@ flowchart LR
   P1["Phase 1: MVP<br/>auth, RBAC, builder (11 types),<br/>versioning, public link, collection,<br/>basic results, CSV"]
   P2A["Phase 2A: builder power<br/>logic, piping, more types,<br/>themes, templates, access controls"]
   P2B["Phase 2B: reach and insight<br/>email campaigns, embed,<br/>advanced analytics, XLSX/PDF"]
-  P3["Phase 3: platform<br/>collaboration, API + webhooks,<br/>multi-language, SSO, AI, admin"]
-  P1 --> P2A --> P2B --> P3
+  P3A["Phase 3A: collaboration and platform API<br/>folders, teams, comments, approvals,<br/>notifications, API keys, webhooks"]
+  P3B["Phase 3B: global and governed<br/>multi-language, SSO, AI summaries,<br/>retention, privacy, admin console"]
+  P1 --> P2A --> P2B --> P3A --> P3B
 ```
 
 **Suggestion:** Phase 2 as briefed is about as large as Phase 1 and Phase 3 combined. I propose splitting it into
 **2A** and **2B** so each delivers something demoable. The two halves have no technical dependency on each other
 and can be swapped if email distribution matters more to you than logic.
+
+**Phase 3 is split the same way (2026-11-23).** 3A is collaboration and the platform API. 3B covers languages,
+identity, AI and governance. 3A needs no answer to an open question. Q5 (login-required respondents) and Q10 (AI
+provider) only affect 3B.
 
 ### Where unassigned items went
 
@@ -257,28 +262,19 @@ API keys and webhooks, multi-language, SSO, AI summaries.
 - [ ] XLSX matches the CSV content. The PDF report contains a chart for each question plus the KPIs. A 50 k-response XLSX export completes in < 2 minutes.
 - [ ] Scheduled reports arrive on schedule with the chosen format and filters.
 
-## 4.5 Phase 3: platform
+## 4.5 Phase 3A: collaboration and platform API
 
 **Scope:**
 
 - **Collaboration:**
-  - folders, teams
+  - folders (3 levels) and teams
   - comments on drafts
   - configurable approval before publish
   - audit-log viewer
   - email and in-app notifications: new response, NPS detractor, threshold, closing
 - **Public REST API:** API keys with scopes, curated OpenAPI docs, idempotency keys, outgoing webhooks.
-- **Multi-language surveys:**
-  - translation editor, CSV import/export of strings
-  - language picker plus browser detection
-  - missing-translation checks
-  - right-to-left support (see risks)
-- **Integrations:** a Slack notifier (incoming webhook) built for real. HubSpot and Google Sheets connectors defined as interfaces with stubs.
-- **AI summaries of open text:** themes and sentiment, opt-in per org, labelled, with cost caps.
-- **SSO:** SAML and OIDC, just-in-time provisioning, optional SSO enforcement.
-- **Administration:** retention policies and purge, bulk delete, usage metrics, super admin console.
-- **Privacy:** subject export and erasure (GDPR/CCPA).
-- **Login-required respondents:** pending Q5.
+- **Integrations:** a Slack notifier (incoming webhook) built for real. HubSpot and Google Sheets connectors defined as
+  interfaces with stubs.
 
 **Acceptance criteria**
 - [ ] Folders (3 levels), drag-to-move, and teams usable in survey sharing.
@@ -289,8 +285,25 @@ API keys and webhooks, multi-language, SSO, AI summaries.
 - [ ] API keys are shown once, stored hashed, scoped and revocable. Calls outside a key's scope return `403`. The OpenAPI document validates, and a generated client passes a smoke test.
 - [ ] Replaying a POST with the same `Idempotency-Key` returns the original result without a duplicate.
 - [ ] Webhooks are signed (a sample verifier in docs passes), retried on the documented schedule, viewable with every attempt, redeliverable, auto-disabled after repeated failure, and blocked from private IP ranges (SSRF test).
-- [ ] A survey translated into 2 languages serves each by `lang` param and by browser detection. Logic and piping work in every language. Publish warns about missing strings. A right-to-left language renders mirrored.
 - [ ] The Slack notifier posts new-response and detractor alerts. HubSpot and Google Sheets connectors have interfaces, configuration UI and contract tests against mocks.
+
+## 4.6 Phase 3B: global and governed
+
+**Scope:**
+
+- **Multi-language surveys:**
+  - translation editor, CSV import/export of strings
+  - language picker plus browser detection
+  - missing-translation checks
+  - right-to-left support (see risks)
+- **AI summaries of open text:** themes and sentiment, opt-in per org, labelled, with cost caps. Pending Q10 (provider).
+- **SSO:** SAML and OIDC, just-in-time provisioning, optional SSO enforcement.
+- **Administration:** retention policies and purge, usage metrics, super admin console. (Bulk delete shipped in 2B.)
+- **Privacy:** subject export and erasure (GDPR/CCPA).
+- **Login-required respondents:** pending Q5.
+
+**Acceptance criteria**
+- [ ] A survey translated into 2 languages serves each by `lang` param and by browser detection. Logic and piping work in every language. Publish warns about missing strings. A right-to-left language renders mirrored.
 - [ ] AI summaries:
   - off until an org admin opts in
   - every output labelled "AI-generated" with model and date
@@ -303,7 +316,7 @@ API keys and webhooks, multi-language, SSO, AI summaries.
 - [ ] Usage metrics per org are visible to org admins and super admins.
 - [ ] A subject export request produces a file of every non-anonymous record for an email. Erasure removes them and is audit-logged. Anonymous responses are, correctly, out of scope.
 
-## 4.6 Definition of done (every phase)
+## 4.7 Definition of done (every phase)
 
 - [ ] All acceptance criteria checked off or explicitly deferred with a reason.
 - [ ] `pnpm verify` and end-to-end tests green. No new axe serious or critical violations. Bundle and performance budgets met.

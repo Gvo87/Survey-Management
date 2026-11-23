@@ -1,19 +1,22 @@
 # Survey Management System: Design Docs
 
-**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phases 1, 2A and 2B are
-implemented**; see [phase-1-status.md](phase-1-status.md), [phase-2a-status.md](phase-2a-status.md) and
-[phase-2b-status.md](phase-2b-status.md) for each acceptance criterion and its evidence.
+**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phases 1, 2A, 2B and 3A are
+implemented**; see [phase-1-status.md](phase-1-status.md), [phase-2a-status.md](phase-2a-status.md),
+[phase-2b-status.md](phase-2b-status.md) and [phase-3a-status.md](phase-3a-status.md) for each acceptance
+criterion and its evidence. Phase 3B is next.
 
 | # | Document | Contents |
 |---|---|---|
 | 1 | [Architecture](01-architecture.md) | Stack and why, components, data flows, auth and RBAC, tenant isolation, security, performance, observability, testing, deployment |
 | 2 | [Data model](02-data-model.md) | ERDs, survey definition schema, versioning, how each answer type is stored, SQL schema, anonymous mode, row-level security, growth |
 | 3 | [API design](03-api-design.md) | Conventions, every endpoint with phase tags, request and response shapes, respondent protocol, webhooks |
-| 4 | [Roadmap and acceptance criteria](04-roadmap.md) | Phases 1, 2A, 2B and 3, scope, build order, checklists |
+| 4 | [Roadmap and acceptance criteria](04-roadmap.md) | Phases 1, 2A, 2B, 3A and 3B, scope, build order, checklists |
 | 5 | [Risks and flags](05-risks.md) | Conflicts in the requirements, risks, expensive items |
 | - | [Phase 1 status](phase-1-status.md) | Every Phase 1 acceptance criterion: verified, partly verified, or open |
 | - | [Phase 2A status](phase-2a-status.md) | Every Phase 2A acceptance criterion, plus where the build deviates from the design |
 | - | [Phase 2B status](phase-2b-status.md) | Every Phase 2B acceptance criterion, plus where the build deviates from the design |
+| - | [Phase 3A status](phase-3a-status.md) | Every Phase 3A acceptance criterion, plus where the build deviates from the design |
+| - | [Public API and webhooks](public-api.md) | API keys, scopes, rate limits, idempotency, webhook signatures, retries and a sample verifier |
 | - | [Accessibility record](a11y-p1.md) | Automated WCAG checks done; manual screen-reader checklist |
 
 ## Key decisions
@@ -64,7 +67,7 @@ Q1, Q2, Q3, Q7 and Q8 were answered with the defaults on 2026-11-23. The rest ar
 - **Q7 Quotas and close dates:** let respondents already in progress finish (default), or cut them off strictly?
 - **Q8 Analyst visibility:** analysts see only surveys shared with them (default), or every org survey read-only?
 
-**Needed before later phases:**
+**Needed before later phases** (Q5 and Q10 affect Phase 3B only; 3A needed none):
 
 - **Q4 Infrastructure:** when should production infrastructure as code (Terraform or CDK) land, and is AWS right?
 - **Q5 Login-required respondents:** who logs in? Org members (cheap: reuse login or SSO) or external people
