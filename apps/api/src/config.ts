@@ -24,6 +24,12 @@ export interface Config {
   clamav: { host: string; port: number };
   captcha: 'turnstile' | 'fake';
   turnstile: { siteKey: string | null; secretKey: string | null };
+  /** Phase 2B: campaign emails per org per rolling 24 h (deliverability protection). */
+  emailsPerOrgPerDay: number;
+  /** SNS topic ARNs allowed to post SES bounce/complaint notifications. Empty disables the endpoint. */
+  sesTopicArns: string[];
+  /** Anonymous surveys: filtered results for fewer responses than this are hidden. */
+  minGroupSize: number;
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -67,6 +73,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     clamav: { host: get('CLAMAV_HOST', 'localhost'), port: Number(get('CLAMAV_PORT', '3310')) },
     captcha: 'turnstile',
     turnstile: { siteKey: opt('TURNSTILE_SITE_KEY'), secretKey: opt('TURNSTILE_SECRET_KEY') },
+    emailsPerOrgPerDay: Number(get('EMAILS_PER_ORG_PER_DAY', '10000')),
+    sesTopicArns: (opt('SES_SNS_TOPIC_ARNS') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    minGroupSize: Number(get('ANONYMOUS_MIN_GROUP_SIZE', '5')),
     ...overrides,
   };
 

@@ -314,7 +314,205 @@ export const files = pgTable('files', {
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
+// ── Phase 2B ───────────────────────────────────────────────────────────
+export const contacts = pgTable('contacts', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  email: citext('email').notNull(),
+  firstName: text('first_name'),
+  lastName: text('last_name'),
+  attributes: jsonb('attributes').$type<Record<string, string>>().notNull().default({}),
+  unsubscribedAt: ts('unsubscribed_at'),
+  bouncedAt: ts('bounced_at'),
+  complainedAt: ts('complained_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export const contactLists = pgTable('contact_lists', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  name: text('name').notNull(),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const contactListMembers = pgTable(
+  'contact_list_members',
+  {
+    orgId: uuid('org_id').notNull(),
+    listId: uuid('list_id').notNull(),
+    contactId: uuid('contact_id').notNull(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.listId, t.contactId] })],
+);
+
+export interface ColumnMapping {
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  /** CSV column -> attribute name. */
+  attributes?: Record<string, string>;
+}
+
+export const contactImports = pgTable('contact_imports', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  listId: uuid('list_id'),
+  storageKey: text('storage_key').notNull(),
+  filename: text('filename').notNull(),
+  columnMapping: jsonb('column_mapping').$type<ColumnMapping>().notNull(),
+  status: text('status').$type<'queued' | 'running' | 'done' | 'failed'>().notNull().default('queued'),
+  total: integer('total').notNull().default(0),
+  created: integer('created').notNull().default(0),
+  updated: integer('updated').notNull().default(0),
+  skipped: integer('skipped').notNull().default(0),
+  errors: jsonb('errors').$type<{ row: number; message: string }[]>().notNull().default([]),
+  errorReportKey: text('error_report_key'),
+  failure: text('failure'),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  finishedAt: ts('finished_at'),
+});
+
+export const emailSuppressions = pgTable('email_suppressions', {
+  email: citext('email').primaryKey(),
+  reason: text('reason').$type<'bounce' | 'complaint'>().notNull(),
+  detail: text('detail'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type CampaignStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled';
+export type RecipientStatus = 'pending' | 'sent' | 'failed' | 'suppressed' | 'bounced' | 'responded';
+
+export const campaigns = pgTable('campaigns', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  distributionId: uuid('distribution_id'),
+  listId: uuid('list_id'),
+  name: text('name').notNull(),
+  subject: text('subject').notNull(),
+  body: text('body').notNull(),
+  status: text('status').$type<CampaignStatus>().notNull().default('draft'),
+  scheduledAt: ts('scheduled_at'),
+  timezone: text('timezone').notNull().default('UTC'),
+  reminderAfterDays: integer('reminder_after_days'),
+  reminderMax: integer('reminder_max').notNull().default(0),
+  startedAt: ts('started_at'),
+  finishedAt: ts('finished_at'),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export const recipients = pgTable('recipients', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  campaignId: uuid('campaign_id').notNull(),
+  contactId: uuid('contact_id').notNull(),
+  tokenHash: bytea('token_hash').notNull(),
+  status: text('status').$type<RecipientStatus>().notNull().default('pending'),
+  sentAt: ts('sent_at'),
+  lastSentAt: ts('last_sent_at'),
+  remindersSent: integer('reminders_sent').notNull().default(0),
+  respondedAt: ts('responded_at'),
+  error: text('error'),
+});
+
+export const tags = pgTable('tags', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  name: text('name').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const responseTags = pgTable(
+  'response_tags',
+  {
+    orgId: uuid('org_id').notNull(),
+    responseId: uuid('response_id').notNull(),
+    tagId: uuid('tag_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.responseId, t.tagId] })],
+);
+
+export const responseNotes = pgTable('response_notes', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  responseId: uuid('response_id').notNull(),
+  authorId: uuid('author_id'),
+  body: text('body').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type ExportFormat = 'csv' | 'xlsx' | 'pdf';
+/** What to export: the CSV endpoint's options plus a results filter. */
+export interface ExportOptions {
+  layout?: 'compact' | 'expanded';
+  status?: 'completed' | 'all';
+  includeTest?: boolean;
+  excludeFlagged?: boolean;
+  from?: string;
+  to?: string;
+  versionId?: string;
+  filter?: unknown;
+}
+
+export const dataExports = pgTable('exports', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  requestedBy: uuid('requested_by'),
+  format: text('format').$type<ExportFormat>().notNull(),
+  options: jsonb('options').$type<ExportOptions>().notNull().default({}),
+  status: text('status').$type<'queued' | 'running' | 'done' | 'failed'>().notNull().default('queued'),
+  storageKey: text('storage_key'),
+  filename: text('filename'),
+  size: integer('size'),
+  rowCount: integer('row_count'),
+  failure: text('failure'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  finishedAt: ts('finished_at'),
+  expiresAt: ts('expires_at'),
+});
+
+export const scheduledReports = pgTable('scheduled_reports', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  name: text('name').notNull(),
+  frequency: text('frequency').$type<'daily' | 'weekly' | 'monthly'>().notNull(),
+  day: integer('day'),
+  hour: integer('hour').notNull(),
+  timezone: text('timezone').notNull(),
+  format: text('format').$type<ExportFormat>().notNull(),
+  options: jsonb('options').$type<ExportOptions>().notNull().default({}),
+  recipientIds: uuid('recipient_ids').array().notNull(),
+  active: boolean('active').notNull().default(true),
+  nextRunAt: ts('next_run_at').notNull(),
+  lastRunAt: ts('last_run_at'),
+  lastStatus: text('last_status'),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
 export const tables = {
+  contacts,
+  contactLists,
+  contactListMembers,
+  contactImports,
+  emailSuppressions,
+  campaigns,
+  recipients,
+  tags,
+  responseTags,
+  responseNotes,
+  dataExports,
+  scheduledReports,
   themes,
   globalTemplates,
   questionBankItems,

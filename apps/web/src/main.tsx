@@ -15,6 +15,7 @@ import {
 } from './pages/auth';
 import { MembersPage, OrgSettingsPage } from './pages/settings';
 import { ThemesPage } from './pages/themes';
+import { ContactsPage } from './pages/contacts';
 import { SurveyListPage } from './pages/SurveyList';
 import { BuilderPage } from './pages/survey/builder/Builder';
 import { DistributePage } from './pages/survey/Distribute';
@@ -77,6 +78,7 @@ const router = createBrowserRouter([
           { path: '/settings/members', element: <MembersPage /> },
           { path: '/settings/org', element: <OrgSettingsPage /> },
           { path: '/settings/themes', element: <ThemesPage /> },
+          { path: '/contacts', element: <ContactsPage /> },
           { path: '*', element: <p className="text-sm text-muted">Page not found.</p> },
         ],
       },

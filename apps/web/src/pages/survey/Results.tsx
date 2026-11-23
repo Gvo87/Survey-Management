@@ -1,9 +1,35 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
-import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import type { PageResult, QuestionSummary, ResultsSummary } from '@survey/contracts';
+import { useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router';
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
+import type {
+  Distribution,
+  PageResult,
+  QuestionSummary,
+  ResultFilter,
+  ResultsQueryResult,
+  Tag,
+  VersionDetail,
+  VersionSummary,
+} from '@survey/contracts';
 import { QUESTION_TYPE_META } from '@survey/core';
-import { errorMessage, get } from '../../api';
+import { errorMessage, get, post } from '../../api';
+import {
+  CrosstabCard,
+  DropoffCard,
+  emptyFilter,
+  ExportDialog,
+  FilterBuilder,
+  RecentExports,
+  ScheduledReportsCard,
+  SegmentComparison,
+  toResultFilter,
+  useFilterSources,
+  useLiveUpdates,
+  WordCloud,
+  type FilterState,
+  type SegmentState,
+} from './analysis';
 import {
   BarList,
   Columns,
@@ -19,7 +45,6 @@ import {
   Button,
   Card,
   Checkbox,
-  Dialog,
   EmptyState,
   SelectField,
   TextField,
@@ -72,14 +97,58 @@ export function useResultFilters() {
 export function ResultsPage() {
   const { survey } = useSurvey();
   const f = useResultFilters();
+  const queryClient = useQueryClient();
+  const [search] = useSearchParams();
   const [exporting, setExporting] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const [draft, setDraft] = useState<{ filter: FilterState; segments: SegmentState[] }>({ filter: emptyFilter(), segments: [] });
+  const [applied, setApplied] = useState<{ filter: FilterState; segments: SegmentState[] }>({ filter: emptyFilter(), segments: [] });
+
+  // What the filter builder can refer to: questions, hidden fields, tags and links.
+  const versions = useQuery({ queryKey: ['versions', survey.id], queryFn: () => get<VersionSummary[]>(`/surveys/${survey.id}/versions`), enabled: Boolean(survey.currentVersionNumber) });
+  const current = versions.data?.[0];
+  const version = useQuery({ queryKey: ['version', current?.id], queryFn: () => get<VersionDetail>(`/surveys/${survey.id}/versions/${current!.id}`), enabled: Boolean(current) });
+  const tags = useQuery({ queryKey: ['tags', survey.id], queryFn: () => get<Tag[]>(`/surveys/${survey.id}/tags`) });
+  const links = useQuery({ queryKey: ['distributions', survey.id], queryFn: () => get<Distribution[]>(`/surveys/${survey.id}/distributions`) });
+
+  const [questions, setQuestions] = useState<QuestionSummary[]>([]);
+  const context = useMemo(
+    () => ({ questions, hiddenFields: (version.data?.definition.hiddenFields ?? []).map((h) => h.key), tags: tags.data ?? [], links: links.data ?? [] }),
+    [questions, version.data, tags.data, links.data],
+  );
+  const sources = useFilterSources(context);
+  const filter = toResultFilter(applied.filter, sources);
+  const segments = applied.segments
+    .map((s, i) => ({ name: s.name.trim() || `Segment ${i + 1}`, filter: toResultFilter(s.filter, sources) }))
+    .filter((s): s is { name: string; filter: NonNullable<typeof filter> } => Boolean(s.filter));
+
+  const scope = useMemo(() => {
+    const p = f.params;
+    return {
+      ...(p.get('from') ? { from: p.get('from') } : {}),
+      ...(p.get('to') ? { to: p.get('to') } : {}),
+      ...(p.get('versionId') ? { versionId: p.get('versionId') } : {}),
+      includePartial: p.get('includePartial') === 'true',
+      includeTest: p.get('includeTest') === 'true',
+      excludeFlagged: p.get('excludeFlagged') === 'true',
+      ...(filter ? { filter } : {}),
+    };
+  }, [f.params, filter]);
+
+  const live = useLiveUpdates(survey.id, () => void queryClient.invalidateQueries({ queryKey: ['results', survey.id] }));
   const query = useQuery({
-    queryKey: ['results', survey.id, f.params.toString()],
-    queryFn: () => get<ResultsSummary>(`/surveys/${survey.id}/results/summary?${f.params}`),
-    refetchInterval: 15_000,
+    queryKey: ['results', survey.id, JSON.stringify(scope), JSON.stringify(segments)],
+    queryFn: () => post<ResultsQueryResult>(`/surveys/${survey.id}/results/query`, { ...scope, segments }),
+    // Live updates push changes; without them (or as a safety net) poll.
+    refetchInterval: live ? 120_000 : 15_000,
     placeholderData: keepPreviousData,
+    enabled: Boolean(survey.currentVersionNumber),
   });
-  const data = query.data;
+  const data = query.data?.overall ?? null;
+  useEffect(() => {
+    if (data && data.questions !== questions && !filter) setQuestions(data.questions);
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+  const activeCount = applied.filter.rows.length + applied.segments.length;
 
   if (!survey.currentVersionNumber)
     return (
@@ -113,16 +182,8 @@ export function ResultsPage() {
           ))}
         </SelectField>
         <div className="flex flex-col gap-1 pb-2">
-          <Checkbox
-            label="Include partial responses"
-            checked={f.includePartial}
-            onChange={(e) => f.setIncludePartial(e.target.checked)}
-          />
-          <Checkbox
-            label="Include test responses"
-            checked={f.includeTest}
-            onChange={(e) => f.setIncludeTest(e.target.checked)}
-          />
+          <Checkbox label="Include partial responses" checked={f.includePartial} onChange={(e) => f.setIncludePartial(e.target.checked)} />
+          <Checkbox label="Include test responses" checked={f.includeTest} onChange={(e) => f.setIncludeTest(e.target.checked)} />
           <Checkbox
             label="Leave out low-quality responses"
             hint="Too fast, straight-lined, or with a file that contained malware."
@@ -130,23 +191,82 @@ export function ResultsPage() {
             onChange={(e) => f.setExcludeFlagged(e.target.checked)}
           />
         </div>
+        <Button aria-expanded={showTools} onClick={() => setShowTools((v) => !v)}>
+          Filter and compare{activeCount ? ` (${activeCount})` : ''}
+        </Button>
         <div className="ml-auto flex items-center gap-3 pb-1">
           <span className="text-xs text-muted" aria-live="polite">
-            {query.isFetching
-              ? 'Updating…'
-              : data
-                ? `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`
-                : ''}
+            {query.isFetching ? 'Updating…' : data ? `${live ? 'Live · ' : ''}Updated ${new Date(data.generatedAt).toLocaleTimeString()}` : ''}
           </span>
-          <Button onClick={() => setExporting(true)}>Export CSV</Button>
+          <Button onClick={() => setExporting(true)}>Export</Button>
         </div>
       </div>
 
+      {showTools ? (
+        <Card title="Filter and compare">
+          <div className="flex flex-col gap-5">
+            <fieldset className="flex flex-col gap-2">
+              <legend className="mb-1 text-sm font-semibold">Only include responses where…</legend>
+              <FilterBuilder state={draft.filter} sources={sources} idPrefix="filter" onChange={(filter) => setDraft({ ...draft, filter })} />
+            </fieldset>
+            <fieldset className="flex flex-col gap-3">
+              <legend className="mb-1 text-sm font-semibold">Compare segments side by side (up to 4)</legend>
+              {draft.segments.map((segment, i) => (
+                <div key={i} className="flex flex-col gap-2 rounded-lg border border-line p-3">
+                  <div className="flex items-end gap-2">
+                    <TextField
+                      label={`Segment ${i + 1} name`}
+                      className="flex-1"
+                      value={segment.name}
+                      onChange={(e) => setDraft({ ...draft, segments: draft.segments.map((s, j) => (j === i ? { ...s, name: e.target.value } : s)) })}
+                    />
+                    <Button size="sm" variant="ghost" className="mb-1" onClick={() => setDraft({ ...draft, segments: draft.segments.filter((_, j) => j !== i) })}>
+                      Remove
+                    </Button>
+                  </div>
+                  <FilterBuilder
+                    state={segment.filter}
+                    sources={sources}
+                    idPrefix={`segment-${i}`}
+                    onChange={(filter) => setDraft({ ...draft, segments: draft.segments.map((s, j) => (j === i ? { ...s, filter } : s)) })}
+                  />
+                </div>
+              ))}
+              {draft.segments.length < 4 ? (
+                <Button size="sm" className="self-start" onClick={() => setDraft({ ...draft, segments: [...draft.segments, { name: '', filter: emptyFilter() }] })}>
+                  + Segment
+                </Button>
+              ) : null}
+            </fieldset>
+            <div className="flex gap-2">
+              <Button variant="primary" onClick={() => setApplied(draft)}>
+                Apply
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setDraft({ filter: emptyFilter(), segments: [] });
+                  setApplied({ filter: emptyFilter(), segments: [] });
+                }}
+              >
+                Clear
+              </Button>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
       {query.error ? <Alert tone="error">{errorMessage(query.error)}</Alert> : null}
-      {!data ? <p className="text-sm text-muted">Loading results…</p> : null}
+      {!query.data ? <p className="text-sm text-muted">Loading results…</p> : null}
+      {query.data?.suppressed ? (
+        <Alert tone="info">
+          Fewer than {query.data.minGroupSize} responses match. This survey is anonymous, so groups that small aren't shown.
+        </Alert>
+      ) : null}
 
       {data ? (
         <div className={query.isFetching && query.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}>
+          {filter ? <p className="mb-3 text-sm text-muted">Showing filtered results.</p> : null}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
             <StatTile label="Completed" value={formatNumber(data.totals.completed)} />
             <StatTile label="Started" value={formatNumber(data.totals.started)} />
@@ -155,9 +275,13 @@ export function ResultsPage() {
             <StatTile label="Median time" value={formatDuration(data.totals.medianDurationSec)} />
           </div>
           {data.totals.disqualified ? (
-            <p className="mt-2 text-sm text-muted">
-              {formatNumber(data.totals.disqualified)} screened out by logic rules (not counted as completed).
-            </p>
+            <p className="mt-2 text-sm text-muted">{formatNumber(data.totals.disqualified)} screened out by logic rules (not counted as completed).</p>
+          ) : null}
+
+          {query.data?.segments.length ? (
+            <div className="mt-6">
+              <SegmentComparison segments={query.data.segments} names={query.data.segments.map((s) => s.name)} />
+            </div>
           ) : null}
 
           {data.dropoff.length > 1 ? (
@@ -172,26 +296,26 @@ export function ResultsPage() {
                 }))}
               />
               <p className="mt-3 text-xs text-muted">
-                Respondents who reached each page (current version).{' '}
-                {data.dropoff.reduce((s, p) => s + p.abandonedHere, 0)} left part-way.
+                Respondents who reached each page (current version). {data.dropoff.reduce((s, p) => s + p.abandonedHere, 0)} left part-way.
               </p>
             </Card>
           ) : null}
 
           <div className="mt-6 flex flex-col gap-4">
             {data.questions.map((q, i) => (
-              <QuestionCard key={q.questionKey} number={i + 1} q={q} surveyId={survey.id} />
+              <QuestionCard key={q.questionKey} number={i + 1} q={q} surveyId={survey.id} filter={filter} />
             ))}
+          </div>
+          <div className="mt-6 flex flex-col gap-4">
+            <CrosstabCard surveyId={survey.id} questions={data.questions} scope={scope} />
+            <DropoffCard surveyId={survey.id} scope={scope} />
           </div>
         </div>
       ) : null}
 
-      <ExportDialog
-        open={exporting}
-        onClose={() => setExporting(false)}
-        surveyId={survey.id}
-        filters={f.params}
-      />
+      <RecentExports surveyId={survey.id} highlight={search.get('export')} />
+      <ScheduledReportsCard surveyId={survey.id} canManage />
+      <ExportDialog open={exporting} onClose={() => setExporting(false)} surveyId={survey.id} csvParams={f.params} scope={scope} />
     </div>
   );
 }
@@ -205,8 +329,10 @@ const CATEGORICAL = [
   { color: '#008300', ink: 'light' },
 ] as const;
 
-function QuestionCard({ q, number, surveyId }: { q: QuestionSummary; number: number; surveyId: string }) {
+function QuestionCard({ q, number, surveyId, filter }: { q: QuestionSummary; number: number; surveyId: string; filter?: ResultFilter }) {
   const [view, setView] = useState<'chart' | 'share' | 'table'>('chart');
+  const [words, setWords] = useState(false);
+  const openText = q.type === 'short_text' || q.type === 'long_text';
   const canShare = (q.type === 'single_choice' || q.type === 'dropdown') && q.answered > 0;
   const isText =
     q.type === 'short_text' || q.type === 'long_text' || q.type === 'email' || q.type === 'phone' || q.type === 'file_upload' || q.type === 'consent';
@@ -220,7 +346,16 @@ function QuestionCard({ q, number, surveyId }: { q: QuestionSummary; number: num
         </span>
       }
       actions={
-        !isText ? (
+        openText && q.answered ? (
+          <div role="group" aria-label="View" className="flex shrink-0 gap-1">
+            <Button size="sm" variant={!words ? 'primary' : 'ghost'} aria-pressed={!words} onClick={() => setWords(false)}>
+              Answers
+            </Button>
+            <Button size="sm" variant={words ? 'primary' : 'ghost'} aria-pressed={words} onClick={() => setWords(true)}>
+              Common words
+            </Button>
+          </div>
+        ) : !isText ? (
           <div role="group" aria-label="View" className="flex shrink-0 gap-1">
             {(['chart', ...(canShare ? ['share'] : []), 'table'] as const).map((v) => (
               <Button
@@ -240,7 +375,7 @@ function QuestionCard({ q, number, surveyId }: { q: QuestionSummary; number: num
       <p className="-mt-2 mb-4 text-xs text-muted">
         {QUESTION_TYPE_META[q.type].label} · {formatNumber(q.answered)} answered
       </p>
-      <QuestionBody q={q} view={view} surveyId={surveyId} />
+      {words && openText ? <WordCloud surveyId={surveyId} questionKey={q.questionKey} filter={filter} /> : <QuestionBody q={q} view={view} surveyId={surveyId} />}
     </Card>
   );
 }
@@ -605,64 +740,5 @@ function OtherAnswers({ count }: { surveyId: string; questionKey: string; count:
     <p className="text-xs text-muted">
       {formatNumber(count)} chose "Other". Their own words are in the responses and the CSV export.
     </p>
-  );
-}
-
-function ExportDialog({
-  open,
-  onClose,
-  surveyId,
-  filters,
-}: {
-  open: boolean;
-  onClose: () => void;
-  surveyId: string;
-  filters: URLSearchParams;
-}) {
-  const [layout, setLayout] = useState<'compact' | 'expanded'>('compact');
-  const [all, setAll] = useState(false);
-  const params = new URLSearchParams(filters);
-  params.delete('includePartial');
-  params.set('layout', layout);
-  params.set('status', all ? 'all' : 'completed');
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Export responses"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <a
-            href={`/api/v1/surveys/${surveyId}/export.csv?${params}`}
-            download
-            onClick={() => setTimeout(onClose, 300)}
-            className="inline-flex h-10 items-center rounded-lg bg-brand-600 px-4 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Download CSV
-          </a>
-        </>
-      }
-    >
-      <div className="flex flex-col gap-4">
-        <p className="text-sm text-muted">
-          Uses the date, version and test filters currently applied to the results. Opens in Excel and Google
-          Sheets.
-        </p>
-        <SelectField
-          label="Layout"
-          value={layout}
-          onChange={(e) => setLayout(e.target.value as 'compact' | 'expanded')}
-        >
-          <option value="compact">Compact: one column per question</option>
-          <option value="expanded">Expanded: one 0/1 column per multiple-choice option</option>
-        </SelectField>
-        <Checkbox
-          label="Include partial (unfinished) responses"
-          checked={all}
-          onChange={(e) => setAll(e.target.checked)}
-        />
-      </div>
-    </Dialog>
   );
 }

@@ -245,6 +245,8 @@ export const SaveResponseRequest = z.object({
       locale: z.string().max(10),
       /** Turnstile token, when the survey requires a CAPTCHA. */
       captchaToken: z.string().max(2048).optional(),
+      /** Phase 2B: the personal token from a campaign email link. */
+      recipientToken: z.string().max(64).optional(),
     })
     .optional(),
   /** Full snapshot of every answer so far; the latest `seq` wins. */
@@ -259,6 +261,7 @@ export type RespondentAccess =
   | { state: 'closed'; message: string }
   | { state: 'not_yet_open'; opensAt: string }
   | { state: 'password_required' }
+  | { state: 'already_responded' }
   | { state: 'not_found' };
 
 export const UnlockRequest = z.object({ password: z.string().min(1).max(200) });
@@ -293,7 +296,11 @@ export interface RespondentSurvey {
   captchaSiteKey: string | null;
   /** Hidden-field values the distribution link presets. They win over URL parameters, as on the server. */
   presetHiddenFields: Record<string, string>;
+  /** Phase 2B: contact fields for piping, when opened from a campaign link (never for anonymous surveys). */
+  contact: Record<string, string> | null;
 }
+
+export const ResumeLinkRequest = z.object({ email: z.email().max(254) });
 
 export interface UploadedFile {
   fileId: string;
@@ -409,6 +416,10 @@ export const ListResponsesQuery = z.object({
   includeTest: z.stringbool().default(false),
   /** Only responses with this quality flag. */
   flag: z.enum(['too_fast', 'straight_lined', 'malware']).optional(),
+  /** Phase 2B: full-text search in open answers, a tag, or a results filter (JSON). */
+  q: z.string().trim().max(200).optional(),
+  tag: z.uuid().optional(),
+  filter: z.string().max(20_000).optional(),
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -431,6 +442,8 @@ export interface ResponseSummary {
   preview: string;
   /** Phase 2A: `too_fast`, `straight_lined`, `malware`. */
   qualityFlags: string[];
+  /** Phase 2B. */
+  tags: { id: string; name: string }[];
 }
 
 export interface FileInfo {
@@ -446,6 +459,10 @@ export interface ResponseDetail extends ResponseSummary {
   hiddenFields: Record<string, string>;
   answers: { questionKey: string; title: string; type: string; value: AnswerValue; display: string }[];
   files: FileInfo[];
+  /** Phase 2B. */
+  notes: { id: string; author: string | null; authorId: string | null; body: string; createdAt: string }[];
+  /** Phase 2B: the campaign recipient, for non-anonymous surveys. */
+  contact: { email: string; name: string } | null;
 }
 
 export const ExportQuery = z.object({
@@ -511,3 +528,319 @@ export interface BankItem {
   createdBy: string | null;
   createdAt: string;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Phase 2B
+// ═════════════════════════════════════════════════════════════════════════════
+
+// -- Results filters: the logic condition grammar plus response fields ---------
+const FilterOp = z.enum([
+  'answered', 'not_answered', 'eq', 'neq', 'in', 'not_in', 'contains_any', 'contains_all', 'contains_none',
+  'gt', 'gte', 'lt', 'lte', 'between', 'text_contains',
+]);
+const FilterValue = z.union([z.string().max(500), z.number(), z.boolean(), z.array(z.union([z.string().max(500), z.number()])).max(100)]);
+export const RESULT_FIELDS = ['status', 'startedAt', 'completedAt', 'versionId', 'distributionId', 'deviceType', 'tag'] as const;
+export type ResultField = (typeof RESULT_FIELDS)[number];
+
+export type ResultFilter =
+  | { all: ResultFilter[] }
+  | { any: ResultFilter[] }
+  | { not: ResultFilter }
+  | { question: string; sub?: string; op: z.infer<typeof FilterOp>; value?: z.infer<typeof FilterValue> }
+  | { hidden: string; op: 'eq' | 'neq' | 'in' | 'not_in' | 'text_contains' | 'answered' | 'not_answered'; value?: string | string[] }
+  | { field: ResultField; op: 'eq' | 'neq' | 'in' | 'not_in' | 'gte' | 'lte' | 'between'; value: z.infer<typeof FilterValue> };
+
+export const ResultFilterSchema: z.ZodType<ResultFilter> = z.lazy(() =>
+  z.union([
+    z.strictObject({ all: z.array(ResultFilterSchema).min(1).max(20) }),
+    z.strictObject({ any: z.array(ResultFilterSchema).min(1).max(20) }),
+    z.strictObject({ not: ResultFilterSchema }),
+    z.strictObject({ question: z.string().max(40), sub: z.string().max(40).optional(), op: FilterOp, value: FilterValue.optional() }),
+    z.strictObject({
+      hidden: z.string().max(64),
+      op: z.enum(['eq', 'neq', 'in', 'not_in', 'text_contains', 'answered', 'not_answered']),
+      value: z.union([z.string().max(500), z.array(z.string().max(500)).max(100)]).optional(),
+    }),
+    z.strictObject({ field: z.enum(RESULT_FIELDS), op: z.enum(['eq', 'neq', 'in', 'not_in', 'gte', 'lte', 'between']), value: FilterValue }),
+  ]),
+) as z.ZodType<ResultFilter>;
+
+/** Base scope shared by results, cross-tab, drop-off and exports (the GET summary's query, as JSON). */
+const ResultScope = {
+  from: IsoDateTime.optional(),
+  to: IsoDateTime.optional(),
+  versionId: z.uuid().optional(),
+  includePartial: z.boolean().default(false),
+  includeTest: z.boolean().default(false),
+  excludeFlagged: z.boolean().default(false),
+  filter: ResultFilterSchema.optional(),
+};
+
+export const ResultsQueryRequest = z.object({
+  ...ResultScope,
+  /** Up to 4 segments, compared side by side. Each is combined with `filter`. */
+  segments: z.array(z.object({ name: z.string().trim().min(1).max(60), filter: ResultFilterSchema })).max(4).default([]),
+});
+export type ResultsQueryRequest = z.infer<typeof ResultsQueryRequest>;
+
+export interface SegmentResult {
+  name: string;
+  /** null when suppressed: anonymous surveys hide groups smaller than the minimum size. */
+  summary: ResultsSummary | null;
+  suppressed: boolean;
+}
+export interface ResultsQueryResult {
+  overall: ResultsSummary | null;
+  suppressed: boolean;
+  segments: SegmentResult[];
+  /** Anonymous surveys: groups smaller than this aren't shown. */
+  minGroupSize: number | null;
+}
+
+const QuestionRef = z.object({ questionKey: z.string().max(40), subKey: z.string().max(40).optional() });
+export const CrosstabRequest = z.object({ ...ResultScope, rows: QuestionRef, columns: QuestionRef });
+export type CrosstabRequest = z.infer<typeof CrosstabRequest>;
+export interface CrosstabResult {
+  rows: { key: string; label: string }[];
+  columns: { key: string; label: string }[];
+  /** counts[row][column] */
+  counts: number[][];
+  rowTotals: number[];
+  columnTotals: number[];
+  total: number;
+  /** Percentages of each row's total / each column's total, one decimal. */
+  rowPct: number[][];
+  columnPct: number[][];
+  chiSquare: { value: number; df: number; p: number } | null;
+  /** Why the chi-square test is missing or unreliable. */
+  warnings: string[];
+}
+
+export const DropoffRequest = z.object({ ...ResultScope });
+export interface DropoffByQuestion {
+  started: number;
+  questions: {
+    questionKey: string;
+    title: string;
+    pageKey: string;
+    /** Responses with an answer to this question (in progress, completed or screened out). */
+    answered: number;
+    /** In-progress responses whose last answer was this question. */
+    leftAfter: number;
+  }[];
+  /** Started but never answered anything. */
+  leftBeforeFirst: number;
+}
+
+export const TermsQuery = z.object({
+  filter: z.string().max(20_000).optional(),
+  includeTest: z.stringbool().default(false),
+});
+export interface TermsResult {
+  answered: number;
+  terms: { term: string; count: number }[];
+}
+
+export interface LiveEvent {
+  type: 'response.completed';
+  completedCount: number;
+}
+
+// -- Tags, notes, bulk delete --------------------------------------------------
+export interface Tag {
+  id: string;
+  name: string;
+  responseCount: number;
+}
+export const CreateTagRequest = z.object({ name: z.string().trim().min(1).max(40) });
+export const CreateNoteRequest = z.object({ body: z.string().trim().min(1).max(5000) });
+export const BulkDeleteRequest = z
+  .object({
+    ids: z.array(z.uuid()).min(1).max(1000).optional(),
+    scope: z
+      .object({
+        status: z.enum(['in_progress', 'completed', 'disqualified', 'all']).default('all'),
+        includeTest: z.boolean().default(false),
+        q: z.string().trim().max(200).optional(),
+        tag: z.uuid().optional(),
+        flag: z.enum(['too_fast', 'straight_lined', 'malware']).optional(),
+        filter: ResultFilterSchema.optional(),
+      })
+      .optional(),
+    /** The count the user confirmed. The delete is refused if the selection no longer matches it. */
+    expectedCount: z.number().int().min(1).max(1_000_000),
+  })
+  .refine((v) => Boolean(v.ids) !== Boolean(v.scope), 'Send either ids or scope.');
+export interface BulkDeleteResult {
+  deleted: number;
+}
+
+// -- Exports and scheduled reports --------------------------------------------
+export const EXPORT_FORMATS = ['csv', 'xlsx', 'pdf'] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
+export const ExportOptionsSchema = z.object({
+  layout: z.enum(['compact', 'expanded']).default('compact'),
+  status: z.enum(['completed', 'all']).default('completed'),
+  includeTest: z.boolean().default(false),
+  excludeFlagged: z.boolean().default(false),
+  from: IsoDateTime.optional(),
+  to: IsoDateTime.optional(),
+  versionId: z.uuid().optional(),
+  filter: ResultFilterSchema.optional(),
+});
+export type ExportOptions = z.infer<typeof ExportOptionsSchema>;
+export const CreateExportRequest = ExportOptionsSchema.extend({ format: z.enum(EXPORT_FORMATS) });
+export interface ExportJob {
+  id: string;
+  format: ExportFormat;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  filename: string | null;
+  size: number | null;
+  rowCount: number | null;
+  downloadUrl: string | null;
+  failure: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  expiresAt: string | null;
+}
+
+export const SaveScheduledReportRequest = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    frequency: z.enum(['daily', 'weekly', 'monthly']),
+    /** weekly: 1 (Monday) to 7; monthly: 1 to 28. */
+    day: z.number().int().min(1).max(28).nullable().default(null),
+    hour: z.number().int().min(0).max(23),
+    timezone: z.string().min(1).max(64),
+    format: z.enum(EXPORT_FORMATS),
+    options: ExportOptionsSchema.default({ layout: 'compact', status: 'completed', includeTest: false, excludeFlagged: false }),
+    recipientIds: z.array(z.uuid()).min(1).max(20),
+    active: z.boolean().default(true),
+  })
+  .refine((v) => v.frequency === 'daily' || v.day !== null, { message: 'Choose a day.', path: ['day'] })
+  .refine((v) => v.frequency !== 'weekly' || (v.day ?? 0) <= 7, { message: 'Choose a weekday.', path: ['day'] });
+export interface ScheduledReport {
+  id: string;
+  name: string;
+  frequency: 'daily' | 'weekly' | 'monthly';
+  day: number | null;
+  hour: number;
+  timezone: string;
+  format: ExportFormat;
+  options: z.infer<typeof ExportOptionsSchema>;
+  recipients: { id: string; name: string; email: string }[];
+  active: boolean;
+  nextRunAt: string;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+}
+
+// -- Contacts -----------------------------------------------------------------
+export type ContactStatus = 'subscribed' | 'unsubscribed' | 'bounced';
+export interface Contact {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  attributes: Record<string, string>;
+  status: ContactStatus;
+  lists: { id: string; name: string }[];
+  createdAt: string;
+}
+const AttributeName = z.string().trim().min(1).max(40).regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Use letters, numbers and _.');
+export const ContactsQuery = z.object({
+  q: z.string().trim().max(200).optional(),
+  listId: z.uuid().optional(),
+  status: z.enum(['subscribed', 'unsubscribed', 'bounced']).optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export const SaveContactRequest = z.object({
+  email: z.email().max(254),
+  firstName: z.string().trim().max(100).nullable().optional(),
+  lastName: z.string().trim().max(100).nullable().optional(),
+  attributes: z.record(AttributeName, z.string().max(500)).optional(),
+  listIds: z.array(z.uuid()).max(50).optional(),
+});
+export interface ContactList {
+  id: string;
+  name: string;
+  memberCount: number;
+  createdAt: string;
+}
+export const SaveListRequest = z.object({ name: z.string().trim().min(1).max(100) });
+export const ListMembersRequest = z.object({ contactIds: z.array(z.uuid()).min(1).max(1000) });
+export const ColumnMappingSchema = z.object({
+  email: z.string().min(1).max(200),
+  firstName: z.string().max(200).optional(),
+  lastName: z.string().max(200).optional(),
+  attributes: z.record(z.string().max(200), AttributeName).optional(),
+});
+/** Multipart fields sent before the CSV file. */
+export const ImportFieldsSchema = z.object({
+  mapping: z.string().max(20_000),
+  listId: z.uuid().optional(),
+  newListName: z.string().trim().min(1).max(100).optional(),
+});
+export interface ContactImport {
+  id: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  filename: string;
+  listId: string | null;
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: { row: number; message: string }[];
+  errorReportUrl: string | null;
+  failure: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+// -- Campaigns ------------------------------------------------------------------
+export type CampaignStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled';
+const Reminders = z.object({ afterDays: z.number().int().min(1).max(60), max: z.number().int().min(0).max(5) });
+export const SaveCampaignRequest = z.object({
+  name: z.string().trim().min(1).max(100),
+  listId: z.uuid(),
+  subject: z.string().trim().min(1).max(200),
+  body: z.string().trim().min(1).max(10_000),
+  reminders: Reminders.nullable().default(null),
+});
+export const SendCampaignRequest = z.object({
+  /** Local date and time in `timezone`, e.g. 2026-12-01T09:00. Omit to send now. */
+  scheduledAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/).optional(),
+  timezone: z.string().min(1).max(64).default('UTC'),
+});
+export interface Campaign {
+  id: string;
+  surveyId: string;
+  name: string;
+  list: { id: string; name: string } | null;
+  subject: string;
+  body: string;
+  status: CampaignStatus;
+  scheduledAt: string | null;
+  timezone: string;
+  reminders: { afterDays: number; max: number } | null;
+  counts: { total: number; pending: number; sent: number; responded: number; bounced: number; failed: number; suppressed: number };
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+export interface CampaignRecipient {
+  id: string;
+  email: string;
+  name: string;
+  status: 'pending' | 'sent' | 'failed' | 'suppressed' | 'bounced' | 'responded';
+  sentAt: string | null;
+  remindersSent: number;
+  respondedAt: string | null;
+  error: string | null;
+}
+export const RecipientsQuery = z.object({
+  status: z.enum(['pending', 'sent', 'failed', 'suppressed', 'bounced', 'responded']).optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});

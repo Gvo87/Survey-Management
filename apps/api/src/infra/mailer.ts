@@ -4,6 +4,10 @@ export interface EmailMessage {
   to: string;
   subject: string;
   text: string;
+  /** Phase 2B: campaign emails also carry HTML, list headers and report attachments. */
+  html?: string;
+  headers?: Record<string, string>;
+  attachments?: { filename: string; content: Buffer; contentType: string }[];
 }
 
 export interface Mailer {
@@ -21,7 +25,7 @@ export function createMailer(transport: 'smtp' | 'memory', smtpUrl: string, from
   return {
     outbox: [],
     send: async (m) => {
-      await smtp.sendMail({ from, to: m.to, subject: m.subject, text: m.text });
+      await smtp.sendMail({ from, to: m.to, subject: m.subject, text: m.text, html: m.html, headers: m.headers, attachments: m.attachments });
     },
   };
 }

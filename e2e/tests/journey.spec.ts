@@ -68,7 +68,8 @@ test('a creator builds, publishes and analyzes a survey', async ({ page, browser
 
   // Export
   await page.getByRole('link', { name: 'Results' }).click();
-  await page.getByRole('button', { name: 'Export CSV' }).click();
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  await page.getByLabel('Format').selectOption('csv');
   const [download] = await Promise.all([
     page.waitForEvent('download'),
     page.getByRole('link', { name: 'Download CSV' }).click(),

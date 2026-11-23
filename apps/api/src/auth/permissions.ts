@@ -4,7 +4,7 @@
  */
 import type { OrgRole, SurveyRole } from '@survey/contracts';
 
-export type OrgCapability = 'org.update' | 'org.members.manage' | 'surveys.create';
+export type OrgCapability = 'org.update' | 'org.members.manage' | 'surveys.create' | 'contacts.manage';
 
 export type SurveyCapability =
   | 'survey.view'
@@ -20,8 +20,9 @@ export type SurveyCapability =
   | 'responses.delete';
 
 export const ORG_CAPABILITIES: Record<OrgRole, readonly OrgCapability[]> = {
-  org_admin: ['org.update', 'org.members.manage', 'surveys.create'],
-  creator: ['surveys.create'],
+  org_admin: ['org.update', 'org.members.manage', 'surveys.create', 'contacts.manage'],
+  // Contacts are personal data: analysts never see them.
+  creator: ['surveys.create', 'contacts.manage'],
   analyst: [],
 };
 

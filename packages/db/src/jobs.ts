@@ -8,6 +8,13 @@ export const QUEUES = {
   cleanupSessions: 'sessions.cleanup',
   scanFile: 'files.scan',
   deleteObjects: 'files.delete-objects',
+  importContacts: 'contacts.import',
+  startCampaign: 'campaigns.start',
+  sendCampaign: 'campaigns.send',
+  campaignReminders: 'campaigns.reminders',
+  generateExport: 'exports.generate',
+  cleanupExports: 'exports.cleanup',
+  scheduledReportsTick: 'reports.tick',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

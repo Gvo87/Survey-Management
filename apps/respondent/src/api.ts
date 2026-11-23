@@ -80,11 +80,16 @@ declare global {
   }
 }
 
-export async function loadSurvey(publicId: string, key: string | null, distribution: string | null): Promise<RespondentSurvey> {
+export async function loadSurvey(
+  publicId: string,
+  key: string | null,
+  distribution: string | null,
+  recipientToken: string | null = null,
+): Promise<RespondentSurvey> {
   // Reuse the request index.html started before the bundle loaded, if it matches.
   const prefetch = window.__surveyPrefetch;
   window.__surveyPrefetch = undefined;
-  if (prefetch && !readAccessToken(publicId)) {
+  if (prefetch && !readAccessToken(publicId) && !recipientToken) {
     try {
       const result = await prefetch;
       if (result.key === key) {
@@ -95,9 +100,20 @@ export async function loadSurvey(publicId: string, key: string | null, distribut
       if (error instanceof ApiError && !error.retryable) throw error;
     }
   }
-  const query = distribution ? `?d=${encodeURIComponent(distribution)}` : '';
+  const params = new URLSearchParams();
+  if (distribution) params.set('d', distribution);
+  if (recipientToken) params.set('t', recipientToken);
+  const query = params.toString() ? `?${params}` : '';
   return request<RespondentSurvey>(publicId, 'GET', `/r/v1/s/${publicId}${query}`, key);
 }
+
+export const emailResumeLink = (publicId: string, key: string, email: string) =>
+  request<{ sent: boolean }>(publicId, 'POST', `/r/v1/s/${publicId}/response/resume-link`, key, { email });
+
+export const getUnsubscribe = (token: string) =>
+  request<{ orgName: string; email: string; unsubscribed: boolean }>('', 'GET', `/r/v1/unsubscribe/${token}`, null);
+
+export const postUnsubscribe = (token: string) => request<{ unsubscribed: boolean }>('', 'POST', `/r/v1/unsubscribe/${token}`, null, {});
 
 export async function unlock(publicId: string, password: string): Promise<void> {
   const { accessToken } = await request<UnlockResult>(publicId, 'POST', `/r/v1/s/${publicId}/unlock`, null, { password });

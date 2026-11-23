@@ -17,6 +17,10 @@ import {
 import type { Deps } from '../deps';
 import { audit } from '../audit';
 import type { EmailJob, JobPayloads } from '../infra/jobs';
+import { campaignJobs } from './campaigns';
+import { publishLiveEvent } from '../modules/live';
+import { importContacts } from './import-contacts';
+import { exportJobs } from './exports';
 
 export type JobHandlers = { [Q in QueueName]: (data: JobPayloads[Q]) => Promise<void> };
 
@@ -93,7 +97,13 @@ export function createJobHandlers(deps: Deps): JobHandlers {
     'email.send': (job) => sendEmail(deps, job),
 
     'aggregates.response-completed': async ({ orgId, surveyId, responseId }) => {
-      await withTenant(pool, orgId, (tx) => aggregateResponse(tx.client, surveyId, responseId));
+      const counted = await withTenant(pool, orgId, async (tx) => {
+        const added = await aggregateResponse(tx.client, surveyId, responseId);
+        const { rows } = await tx.client.query<{ completed_count: number }>('select completed_count from surveys where id = $1', [surveyId]);
+        return added ? (rows[0]?.completed_count ?? null) : null;
+      });
+      // Dashboards refetch as soon as the aggregates include the response.
+      if (counted !== null) await publishLiveEvent(deps.redis, surveyId, { type: 'response.completed', completedCount: counted });
     },
 
     'aggregates.rebuild': async ({ orgId, surveyId }) => {
@@ -178,5 +188,9 @@ export function createJobHandlers(deps: Deps): JobHandlers {
     'files.delete-objects': async ({ keys }) => {
       for (const key of keys) await deps.storage.delete(key);
     },
+
+    'contacts.import': ({ orgId, importId }) => importContacts(deps, orgId, importId),
+    ...campaignJobs(deps),
+    ...exportJobs(deps),
   };
 }

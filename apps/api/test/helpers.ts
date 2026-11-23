@@ -266,13 +266,15 @@ export const newResponseKey = () => randomBytes(16).toString('base64url');
 
 /** Respondent stand-in: GET the survey, save once, complete. */
 export class Respondent {
-  readonly key = newResponseKey();
+  readonly key: string;
   seq = 0;
   constructor(
     readonly app: FastifyInstance,
     readonly publicId: string,
-    readonly opts: { ip?: string; userAgent?: string; query?: string; headers?: Record<string, string> } = {},
-  ) {}
+    readonly opts: { ip?: string; userAgent?: string; query?: string; headers?: Record<string, string>; key?: string } = {},
+  ) {
+    this.key = opts.key ?? newResponseKey();
+  }
 
   private headers() {
     return {

@@ -2,14 +2,24 @@ import { Readable } from 'node:stream';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
+  CrosstabRequest,
+  DropoffRequest,
   ExportQuery,
   ListResponsesQuery,
+  ResultFilterSchema,
   ResultsQuery,
+  ResultsQueryRequest,
+  TermsQuery,
   TextAnswersQuery,
+  type CrosstabResult,
+  type DropoffByQuestion,
   type QuestionSummary,
   type ResponseDetail,
   type ResponseSummary,
+  type ResultFilter,
+  type ResultsQueryResult,
   type ResultsSummary,
+  type TermsResult,
 } from '@survey/contracts';
 import {
   displayAnswer,
@@ -25,7 +35,11 @@ import {
   ANSWERED_BUCKET,
   bucketCountsSql,
   answers as answersTable,
+  contacts,
   distributions,
+  recipients,
+  responseNotes,
+  users,
   fromCells,
   responses,
   surveys,
@@ -38,23 +52,27 @@ import {
 import type { Deps } from '../deps';
 import { audit } from '../audit';
 import { requireOrg } from '../auth/context';
-import { notFound } from '../lib/errors';
+import { notFound, unprocessable } from '../lib/errors';
+import { compileResultFilter } from '../lib/result-filter';
+import { chiSquare } from '../lib/stats';
+import { STOP_WORDS } from '../lib/stop-words';
 import { csvRow, UTF8_BOM } from '../lib/csv';
 import { decodeCursor, encodeCursor, iso, slugify } from '../lib/misc';
 import { parse } from '../lib/validate';
 import { loadSurvey } from './surveys';
 import { filesForResponses } from './respondent';
+import { exportRows } from './export-data';
 
 type SurveyRow = typeof surveys.$inferSelect;
 type ResponseRow = typeof responses.$inferSelect;
-interface VersionInfo {
+export interface VersionInfo {
   id: string;
   versionNumber: number;
   definition: SurveyDefinition;
 }
 
 /** Collects positional parameters for hand-written SQL. */
-class Params {
+export class Params {
   readonly values: unknown[] = [];
   add(value: unknown): string {
     this.values.push(value);
@@ -62,7 +80,7 @@ class Params {
   }
 }
 
-interface Filter {
+export interface Filter {
   from?: string;
   to?: string;
   versionId?: string;
@@ -72,10 +90,16 @@ interface Filter {
   excludeFlagged?: boolean;
   /** Only responses with this quality flag. */
   flag?: string;
+  /** Phase 2B: results filter (logic grammar), with the questions it may refer to. */
+  filter?: ResultFilter;
+  questions?: Map<string, Question>;
+  /** Phase 2B: full-text search in open answers, and a tag. */
+  q?: string;
+  tag?: string;
 }
 
 /** WHERE conditions on `responses r`. Every value is a bound parameter. */
-function responseConditions(p: Params, surveyId: string, f: Filter): string {
+export function responseConditions(p: Params, surveyId: string, f: Filter): string {
   const parts = [`r.survey_id = ${p.add(surveyId)}`];
   if (!f.includeTest) parts.push('not r.is_test');
   if (f.versionId) parts.push(`r.version_id = ${p.add(f.versionId)}`);
@@ -84,10 +108,24 @@ function responseConditions(p: Params, surveyId: string, f: Filter): string {
   if (f.statuses) parts.push(`r.status = any(${p.add(f.statuses)}::text[])`);
   if (f.excludeFlagged) parts.push(`r.quality_flags = '{}'`);
   if (f.flag) parts.push(`${p.add(f.flag)} = any(r.quality_flags)`);
+  if (f.filter) parts.push(compileResultFilter(p, f.filter, f.questions ?? new Map()));
+  if (f.q)
+    // Same expression as the answers_fulltext index, so the index is used.
+    parts.push(
+      `exists (select 1 from answers a where a.survey_id = r.survey_id and a.response_id = r.id
+         and (a.value_text is not null or a.other_text is not null)
+         and to_tsvector('simple', coalesce(a.value_text, '') || ' ' || coalesce(a.other_text, '')) @@ websearch_to_tsquery('simple', ${p.add(f.q)}))`,
+    );
+  if (f.tag) parts.push(`exists (select 1 from response_tags t where t.response_id = r.id and t.tag_id = ${p.add(f.tag)}::uuid)`);
   return parts.join(' and ');
 }
 
-async function loadVersions(tx: Tx, surveyId: string): Promise<VersionInfo[]> {
+/** Questions of every version by key (for compiling filters). */
+export function questionIndex(versions: VersionInfo[], currentVersionId: string | null): Map<string, Question> {
+  return new Map(questionUnion(versions, currentVersionId).map(({ question }) => [question.key, question]));
+}
+
+export async function loadVersions(tx: Tx, surveyId: string): Promise<VersionInfo[]> {
   return tx.db
     .select({
       id: surveyVersions.id,
@@ -285,7 +323,7 @@ function summarizeQuestion(
 export async function computeSummary(
   tx: Tx,
   survey: SurveyRow,
-  query: ResultsQuery,
+  query: ResultsQuery & { filter?: ResultFilter },
 ): Promise<ResultsSummary> {
   const versions = await loadVersions(tx, survey.id);
   const generatedAt = new Date().toISOString();
@@ -308,13 +346,15 @@ export async function computeSummary(
   if (versions.length === 0) return empty;
 
   const isDefaultView =
-    !query.from && !query.to && !query.versionId && !query.includePartial && !query.includeTest && !query.excludeFlagged;
+    !query.from && !query.to && !query.versionId && !query.includePartial && !query.includeTest && !query.excludeFlagged && !query.filter;
   const filter: Filter = {
     from: query.from,
     to: query.to,
     versionId: query.versionId,
     includeTest: query.includeTest,
     excludeFlagged: query.excludeFlagged,
+    filter: query.filter,
+    questions: questionIndex(versions, survey.currentVersionId),
   };
 
   // Totals: cheap index scans on responses, always live.
@@ -446,7 +486,7 @@ export async function computeSummary(
   };
 }
 
-async function loadCells(
+export async function loadCells(
   tx: Tx,
   surveyId: string,
   responseIds: string[],
@@ -464,7 +504,7 @@ async function loadCells(
   return byResponse;
 }
 
-function answerValues(definition: SurveyDefinition, cells: AnswerCell[]) {
+export function answerValues(definition: SurveyDefinition, cells: AnswerCell[]) {
   return listQuestions(definition)
     .map((question) => {
       const own = cells.filter((c) => c.questionKey === question.key);
@@ -472,6 +512,59 @@ function answerValues(definition: SurveyDefinition, cells: AnswerCell[]) {
       return { question, value };
     })
     .filter((a): a is { question: Question; value: AnswerValue } => a.value !== null);
+}
+
+/** A results filter passed as a JSON query parameter. */
+export function parseFilterParam(raw: string | undefined): ResultFilter | undefined {
+  if (!raw) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw unprocessable('invalid_filter', 'The filter is malformed.');
+  }
+  return parse(ResultFilterSchema, json);
+}
+
+export async function tagsForResponses(tx: Tx, responseIds: string[]) {
+  if (!responseIds.length) return [];
+  const { rows } = await tx.client.query<{ response_id: string; id: string; name: string }>(
+    `select rt.response_id, t.id, t.name from response_tags rt join tags t on t.id = rt.tag_id
+      where rt.response_id = any($1::uuid[]) order by lower(t.name)`,
+    [responseIds],
+  );
+  return rows.map((r) => ({ responseId: r.response_id, id: r.id, name: r.name }));
+}
+
+async function contactOf(tx: Tx, recipientId: string | null) {
+  if (!recipientId) return null;
+  const [row] = await tx.db
+    .select({ email: contacts.email, first: contacts.firstName, last: contacts.lastName })
+    .from(recipients)
+    .innerJoin(contacts, eq(contacts.id, recipients.contactId))
+    .where(eq(recipients.id, recipientId));
+  return row ? { email: row.email, name: [row.first, row.last].filter(Boolean).join(' ') } : null;
+}
+
+/** Statuses counted by results: completed, plus partial responses when asked. */
+const countedStatuses = (includePartial: boolean): ('completed' | 'in_progress')[] =>
+  includePartial ? ['completed', 'in_progress'] : ['completed'];
+
+/** Choice-like answers usable in a cross-tab: their categories in display order. */
+function crosstabAxis(question: Question | undefined, subKey: string | undefined) {
+  if (!question) throw unprocessable('invalid_question', 'Choose questions from this survey.');
+  if (question.type === 'matrix') {
+    const row = question.rows.find((r) => r.key === subKey);
+    if (!row) throw unprocessable('invalid_question', `Choose a row of "${question.title}".`);
+    return { label: `${question.title} › ${row.label}`, categories: question.options.map((o) => ({ key: o.key, label: o.label })), single: !question.config.multiplePerRow };
+  }
+  if (!['single_choice', 'dropdown', 'likert', 'multi_choice'].includes(question.type) || !('options' in question))
+    throw unprocessable('invalid_question', 'Cross-tabs work with choice questions (single, multiple, dropdown, Likert, matrix rows).');
+  return {
+    label: question.title,
+    categories: question.options.map((o) => ({ key: o.key, label: o.label })),
+    single: question.type !== 'multi_choice',
+  };
 }
 
 export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
@@ -487,6 +580,205 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
       return computeSummary(tx, survey, query);
     });
   });
+
+  /**
+   * Filtered results and up to 4 side-by-side segments. Anonymous surveys hide any group smaller
+   * than the minimum group size, so a filter can't single out a respondent.
+   */
+  app.post<IdParams>('/api/v1/surveys/:id/results/query', async (req): Promise<ResultsQueryResult> => {
+    const auth = requireOrg(req);
+    const body = parse(ResultsQueryRequest, req.body);
+    return withTenant(pool, auth.orgId, async (tx) => {
+      const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.view');
+      await tx.client.query(`set local statement_timeout = '20s'`);
+      const min = survey.anonymous ? deps.config.minGroupSize : 0;
+      const tooSmall = (s: ResultsSummary) => min > 0 && s.totals.started > 0 && s.totals.started < min;
+      const overall = await computeSummary(tx, survey, body);
+      const overallSuppressed = Boolean(body.filter) && tooSmall(overall);
+      const segments = [];
+      for (const segment of body.segments) {
+        const filter: ResultFilter = body.filter ? { all: [body.filter, segment.filter] } : segment.filter;
+        const summary = await computeSummary(tx, survey, { ...body, filter });
+        const suppressed = tooSmall(summary);
+        segments.push({ name: segment.name, summary: suppressed ? null : summary, suppressed });
+      }
+      return { overall: overallSuppressed ? null : overall, suppressed: overallSuppressed, segments, minGroupSize: min || null };
+    });
+  });
+
+  app.post<IdParams>('/api/v1/surveys/:id/results/crosstab', async (req): Promise<CrosstabResult> => {
+    const auth = requireOrg(req);
+    const body = parse(CrosstabRequest, req.body);
+    return withTenant(pool, auth.orgId, async (tx) => {
+      const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.view');
+      await tx.client.query(`set local statement_timeout = '20s'`);
+      const versions = await loadVersions(tx, survey.id);
+      const questions = questionIndex(versions, survey.currentVersionId);
+      const rowAxis = crosstabAxis(questions.get(body.rows.questionKey), body.rows.subKey);
+      const colAxis = crosstabAxis(questions.get(body.columns.questionKey), body.columns.subKey);
+      // Each query gets its own parameter list (unused parameters make Postgres fail).
+      const scoped = () => {
+        const p = new Params();
+        const where = responseConditions(p, survey.id, {
+          from: body.from,
+          to: body.to,
+          versionId: body.versionId,
+          includeTest: body.includeTest,
+          excludeFlagged: body.excludeFlagged,
+          statuses: countedStatuses(body.includePartial),
+          filter: body.filter,
+          questions,
+        });
+        const cell = (alias: string, ref: { questionKey: string; subKey?: string }) =>
+          `join answers ${alias} on ${alias}.survey_id = r.survey_id and ${alias}.response_id = r.id
+             and ${alias}.question_key = ${p.add(ref.questionKey)} and ${alias}.sub_key = ${p.add(ref.subKey ?? '')}`;
+        return { p, where, joins: `${cell('a1', body.rows)} ${cell('a2', body.columns)}` };
+      };
+      const q1 = scoped();
+      const { rows } = await tx.client.query<{ rk: string; ck: string; n: number }>(
+        `select x.rk, y.ck, count(distinct r.id)::int as n
+           from responses r
+           ${q1.joins}
+           cross join lateral unnest(a1.value_choices) as x(rk)
+           cross join lateral unnest(a2.value_choices) as y(ck)
+          where ${q1.where}
+          group by 1, 2`,
+        q1.p.values,
+      );
+      const q2 = scoped();
+      const { rows: totalRows } = await tx.client.query<{ n: number }>(
+        `select count(*)::int as n from responses r ${q2.joins} where ${q2.where}`,
+        q2.p.values,
+      );
+      const counts = rowAxis.categories.map((rc) => colAxis.categories.map((cc) => rows.find((r) => r.rk === rc.key && r.ck === cc.key)?.n ?? 0));
+      const rowTotals = counts.map((r) => r.reduce((a, b) => a + b, 0));
+      const columnTotals = colAxis.categories.map((_, j) => counts.reduce((a, r) => a + r[j]!, 0));
+      const total = totalRows[0]!.n;
+      const pct = (n: number, d: number) => (d ? Math.round((n / d) * 1000) / 10 : 0);
+      const warnings: string[] = [];
+      let test: CrosstabResult['chiSquare'] = null;
+      if (survey.anonymous && total > 0 && total < deps.config.minGroupSize)
+        throw unprocessable('group_too_small', `This anonymous survey hides groups of fewer than ${deps.config.minGroupSize} responses.`);
+      if (!rowAxis.single || !colAxis.single)
+        warnings.push('No chi-square test: a question allows several answers, so the cells overlap.');
+      else {
+        const result = chiSquare(counts);
+        if (!result) warnings.push('No chi-square test: at least two answered categories are needed on each side.');
+        else {
+          test = { value: result.value, df: result.df, p: Math.round(result.p * 10000) / 10000 };
+          if (result.lowExpected > 0.2) warnings.push('Over 20% of cells have an expected count below 5, so the chi-square result is unreliable.');
+        }
+      }
+      return {
+        rows: rowAxis.categories,
+        columns: colAxis.categories,
+        counts,
+        rowTotals,
+        columnTotals,
+        total,
+        rowPct: counts.map((r, i) => r.map((n) => pct(n, rowTotals[i]!))),
+        columnPct: counts.map((r) => r.map((n, j) => pct(n, columnTotals[j]!))),
+        chiSquare: test,
+        warnings,
+      };
+    });
+  });
+
+  /** Where respondents stop: per question, how many answered and how many left right after it. */
+  app.post<IdParams>('/api/v1/surveys/:id/results/dropoff', async (req): Promise<DropoffByQuestion> => {
+    const auth = requireOrg(req);
+    const body = parse(DropoffRequest, req.body);
+    return withTenant(pool, auth.orgId, async (tx) => {
+      const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.view');
+      const versions = await loadVersions(tx, survey.id);
+      const version = versions.find((v) => v.id === (body.versionId ?? survey.currentVersionId)) ?? versions[0];
+      if (!version) return { started: 0, questions: [], leftBeforeFirst: 0 };
+      const base: Filter = {
+        from: body.from,
+        to: body.to,
+        versionId: version.id,
+        includeTest: body.includeTest,
+        excludeFlagged: body.excludeFlagged,
+        filter: body.filter,
+        questions: questionIndex(versions, survey.currentVersionId),
+      };
+      const p1 = new Params();
+      const { rows: left } = await tx.client.query<{ key: string | null; n: number }>(
+        `select r.last_question_key as key, count(*)::int as n from responses r
+          where ${responseConditions(p1, survey.id, { ...base, statuses: ['in_progress'] })} group by 1`,
+        p1.values,
+      );
+      const p2 = new Params();
+      const { rows: answered } = await tx.client.query<{ key: string; n: number }>(
+        `select a.question_key as key, count(distinct a.response_id)::int as n
+           from responses r join answers a on a.survey_id = r.survey_id and a.response_id = r.id
+          where ${responseConditions(p2, survey.id, base)} group by 1`,
+        p2.values,
+      );
+      const p3 = new Params();
+      const { rows: started } = await tx.client.query<{ n: number }>(
+        `select count(*)::int as n from responses r where ${responseConditions(p3, survey.id, base)}`,
+        p3.values,
+      );
+      return {
+        started: started[0]!.n,
+        leftBeforeFirst: left.find((l) => l.key === null)?.n ?? 0,
+        questions: version.definition.pages.flatMap((page) =>
+          page.elements
+            .filter((e): e is Question => e.kind === 'question')
+            .map((q) => ({
+              questionKey: q.key,
+              title: plainTitle(q),
+              pageKey: page.key,
+              answered: answered.find((a) => a.key === q.key)?.n ?? 0,
+              leftAfter: left.find((l) => l.key === q.key)?.n ?? 0,
+            })),
+        ),
+      };
+    });
+  });
+
+  /** Most frequent words in a text question (word cloud). Stop words and very short words are skipped. */
+  app.get<{ Params: { id: string; questionKey: string } }>(
+    '/api/v1/surveys/:id/results/questions/:questionKey/terms',
+    async (req): Promise<TermsResult> => {
+      const auth = requireOrg(req);
+      const query = parse(TermsQuery, req.query);
+      const filterJson = parseFilterParam(query.filter);
+      return withTenant(pool, auth.orgId, async (tx) => {
+        const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.view');
+        await tx.client.query(`set local statement_timeout = '15s'`);
+        const versions = await loadVersions(tx, survey.id);
+        const questions = questionIndex(versions, survey.currentVersionId);
+        const scoped = () => {
+          const p = new Params();
+          const where = responseConditions(p, survey.id, { includeTest: query.includeTest, statuses: ['completed'], filter: filterJson, questions });
+          return { p, where, key: p.add(req.params.questionKey) };
+        };
+        const t = scoped();
+        const { rows } = await tx.client.query<{ term: string; n: number }>(
+          `select w as term, count(*)::int as n
+             from (
+               select distinct a.response_id, w
+                 from responses r
+                 join answers a on a.survey_id = r.survey_id and a.response_id = r.id
+                 cross join lateral regexp_split_to_table(lower(a.value_text), '[^[:alnum:]'']+') as w
+                where a.question_key = ${t.key} and a.value_text is not null and ${t.where}
+             ) x
+            where length(w) between 3 and 40 and w !~ '^[0-9'']+$' and not (w = any(${t.p.add(STOP_WORDS)}::text[]))
+            group by 1 order by 2 desc, 1 limit 80`,
+          t.p.values,
+        );
+        const c = scoped();
+        const { rows: count } = await tx.client.query<{ n: number }>(
+          `select count(*)::int as n from responses r join answers a on a.survey_id = r.survey_id and a.response_id = r.id
+            where a.question_key = ${c.key} and a.value_text is not null and ${c.where}`,
+          c.p.values,
+        );
+        return { answered: count[0]!.n, terms: rows.map((r) => ({ term: r.term.replace(/^'+|'+$/g, ''), count: r.n })) };
+      });
+    },
+  );
 
   app.get<{ Params: { id: string; questionKey: string } }>(
     '/api/v1/surveys/:id/results/questions/:questionKey/text',
@@ -534,16 +826,22 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
   app.get<IdParams>('/api/v1/surveys/:id/responses', async (req) => {
     const auth = requireOrg(req);
     const query = parse(ListResponsesQuery, req.query);
+    const filterJson = parseFilterParam(query.filter);
     return withTenant(pool, auth.orgId, async (tx) => {
       const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.view');
       const cursor = decodeCursor(query.cursor, 2);
       const p = new Params();
+      const versionsForFilter = await loadVersions(tx, survey.id);
       const where = responseConditions(p, survey.id, {
         from: query.from,
         to: query.to,
         includeTest: query.includeTest,
         statuses: query.status === 'all' ? undefined : [query.status],
         flag: query.flag,
+        q: query.q,
+        tag: query.tag,
+        filter: filterJson,
+        questions: questionIndex(versionsForFilter, survey.currentVersionId),
       });
       const { rows } = await tx.client.query<
         ResponseRow & { version_number: number; distribution_name: string | null }
@@ -572,12 +870,13 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         distribution_name: string | null;
         quality_flags: string[];
       }[];
-      const versions = await loadVersions(tx, survey.id);
+      const versions = versionsForFilter;
       const cells = await loadCells(
         tx,
         survey.id,
         page.map((r) => r.id),
       );
+      const tagRows = await tagsForResponses(tx, page.map((r) => r.id));
       const data: ResponseSummary[] = page.map((r) => {
         const definition = versions.find((v) => v.id === r.version_id)?.definition;
         const first = definition
@@ -597,13 +896,32 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           deviceType: r.device_type,
           preview: first ? String(first.value).slice(0, 140) : '',
           qualityFlags: r.quality_flags,
+          tags: tagRows.filter((t) => t.responseId === r.id).map(({ id, name }) => ({ id, name })),
         };
       });
       const last = page.at(-1);
+      // The total matching the filters (first page only): the viewer shows it and bulk delete confirms it.
+      let total: number | undefined;
+      if (!cursor) {
+        const cp = new Params();
+        const countWhere = responseConditions(cp, survey.id, {
+          from: query.from,
+          to: query.to,
+          includeTest: query.includeTest,
+          statuses: query.status === 'all' ? undefined : [query.status],
+          flag: query.flag,
+          q: query.q,
+          tag: query.tag,
+          filter: filterJson,
+          questions: questionIndex(versionsForFilter, survey.currentVersionId),
+        });
+        total = (await tx.client.query<{ n: number }>(`select count(*)::int as n from responses r where ${countWhere}`, cp.values)).rows[0]!.n;
+      }
       return {
         data,
         nextCursor:
           rows.length > query.limit && last ? encodeCursor([last.started_at.toISOString(), last.id]) : null,
+        ...(total !== undefined ? { total } : {}),
       };
     });
   });
@@ -647,6 +965,16 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           deviceType: row.r.deviceType,
           preview: '',
           qualityFlags: row.r.qualityFlags,
+          tags: (await tagsForResponses(tx, [row.r.id])).map(({ id, name }) => ({ id, name })),
+          notes: (
+            await tx.db
+              .select({ n: responseNotes, author: users.name })
+              .from(responseNotes)
+              .leftJoin(users, eq(users.id, responseNotes.authorId))
+              .where(eq(responseNotes.responseId, row.r.id))
+              .orderBy(responseNotes.createdAt)
+          ).map(({ n, author }) => ({ id: n.id, author, authorId: n.authorId, body: n.body, createdAt: n.createdAt.toISOString() })),
+          contact: await contactOf(tx, row.r.recipientId),
           hiddenFields: row.r.hiddenFields,
           answers,
           files: (await filesForResponses(tx, [row.r.id])).map((f) => ({
@@ -702,10 +1030,8 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
   app.get<IdParams>('/api/v1/surveys/:id/export.csv', async (req, reply) => {
     const auth = requireOrg(req);
     const query = parse(ExportQuery, req.query);
-    const setup = await withTenant(pool, auth.orgId, async (tx) => {
+    const survey = await withTenant(pool, auth.orgId, async (tx) => {
       const { survey } = await loadSurvey(tx, auth, req.params.id, 'responses.export');
-      const versions = await loadVersions(tx, survey.id);
-      const links = await tx.db.select().from(distributions).where(eq(distributions.surveyId, survey.id));
       await audit(tx, {
         orgId: auth.orgId,
         actorId: auth.userId,
@@ -715,76 +1041,26 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         metadata: { format: 'csv', ...query },
         ip: req.ip,
       });
-      return { survey, versions, links };
+      return survey;
     });
-    const { survey, versions, links } = setup;
-    const fileNames = new Map<string, string>();
-    const columns = buildExportColumns(
-      versions,
-      survey.currentVersionId,
-      links,
-      query.layout,
-      query.includeTest,
-      fileNames,
-    );
-    const filter: Filter = {
-      from: query.from,
-      to: query.to,
-      versionId: query.versionId,
-      includeTest: query.includeTest,
-      statuses: query.status === 'completed' ? ['completed'] : undefined,
-      excludeFlagged: query.excludeFlagged,
-    };
-
-    async function* rows(): AsyncGenerator<string> {
-      yield UTF8_BOM + csvRow(columns.map((c) => c.header));
-      let after: [string, string] | null = null;
-      for (;;) {
-        const batch = await withTenant(pool, auth.orgId, async (tx) => {
-          const p = new Params();
-          const { rows: found } = await tx.client.query<
-            ResponseRow & { started_at: Date; version_id: string; id: string }
-          >(
-            `select r.* from responses r
-              where ${responseConditions(p, survey.id, filter)}
-                ${after ? `and (r.started_at, r.id) > (${p.add(after[0])}::timestamptz, ${p.add(after[1])}::uuid)` : ''}
-              order by r.started_at, r.id limit 1000`,
-            p.values,
-          );
-          const cells = await loadCells(
-            tx,
-            survey.id,
-            found.map((r) => r.id),
-          );
-          for (const f of await filesForResponses(tx, found.map((r) => r.id))) fileNames.set(f.id, f.filename);
-          return { found, cells };
-        });
-        if (batch.found.length === 0) return;
-        let chunk = '';
-        for (const r of batch.found) {
-          const version = versions.find((v) => v.id === r.version_id);
-          const values = new Map<string, AnswerValue>();
-          if (version)
-            for (const { question, value } of answerValues(version.definition, batch.cells.get(r.id) ?? []))
-              values.set(question.key, value);
-          chunk += csvRow(columns.map((c) => c.value(r as unknown as RawResponse, values, version)));
-        }
-        yield chunk;
-        const last = batch.found.at(-1)!;
-        after = [last.started_at.toISOString(), last.id];
+    // Same rows as the XLSX export (export-data.ts), streamed in batches of 1,000.
+    async function* csv(): AsyncGenerator<string> {
+      let first = true;
+      for await (const rows of exportRows(pool, auth.orgId, survey, query)) {
+        yield (first ? UTF8_BOM : '') + rows.map((r) => csvRow(r)).join('');
+        first = false;
       }
     }
-
     const filename = `${slugify(survey.title) || 'survey'}-responses.csv`;
     reply
       .header('content-type', 'text/csv; charset=utf-8')
       .header('content-disposition', `attachment; filename="${filename}"`)
       .header('cache-control', 'no-store');
-    return reply.send(Readable.from(rows()));
+    return reply.send(Readable.from(csv()));
   });
 }
 
-interface RawResponse {
+export interface RawResponse {
   id: string;
   status: string;
   is_test: boolean;
@@ -797,7 +1073,7 @@ interface RawResponse {
   quality_flags: string[];
 }
 
-interface ExportColumn {
+export interface ExportColumn {
   header: string;
   value: (r: RawResponse, answers: Map<string, AnswerValue>, version: VersionInfo | undefined) => unknown;
 }

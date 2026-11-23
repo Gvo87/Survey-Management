@@ -706,3 +706,27 @@ h1:focus {
 .captcha {
   margin: 8px 0 20px;
 }
+
+/* ── Phase 2B: resume by email, unsubscribe, embed ─────────────────────── */
+.resume-later {
+  margin: 20px 0 0;
+}
+.resume-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.resume-row .text-input {
+  flex: 1;
+  min-width: 200px;
+}
+.unsubscribe-actions {
+  margin-top: 16px;
+}
+:root[data-embed] body,
+:root[data-embed] {
+  background: transparent;
+}
+:root[data-embed] .survey {
+  padding: 12px 12px 24px;
+}

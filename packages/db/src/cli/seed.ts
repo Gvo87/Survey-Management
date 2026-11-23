@@ -14,6 +14,9 @@
  * Phase 2A: an Acme brand theme (org default), four global templates, a question-bank entry and a
  * "Product research" survey that uses logic, matrix, ranking, slider, consent and phone questions.
  *
+ * Phase 2B: 30 contacts in a "Q4 customers" list (two unsubscribed, one bounced), a draft email
+ * campaign for the NPS survey (send it and watch Mailpit), and tags and a note on NPS responses.
+ *
  * `--large` also adds a 50,000-response survey to Acme for performance checks.
  */
 import { hash } from '@node-rs/argon2';
@@ -39,7 +42,14 @@ import { newId, newPublicId, newToken, sha256 } from '../ids';
 import {
   answers as answersTable,
   auditLogs,
+  campaigns,
+  contactListMembers,
+  contactLists,
+  contacts,
   distributions,
+  responseNotes,
+  responseTags,
+  tags,
   globalTemplates,
   memberships,
   organizations,
@@ -550,7 +560,7 @@ await db.insert(memberships).values([
 ]);
 
 const teams = ['Engineering', 'Sales', 'Support', 'Marketing', 'Finance'];
-await seedSurvey({
+const npsSurveyId = await seedSurvey({
   orgId: acme,
   ownerId: acmeCreator.id,
   title: 'Customer NPS – Q4 2026',
@@ -618,6 +628,72 @@ await db.insert(questionBankItems).values({
   tags: ['nps', 'standard'],
   createdBy: acmeAdmin.id,
 });
+
+// Phase 2B: contacts, a draft campaign, tags and a note.
+{
+  const FIRST = ['Ava', 'Ben', 'Chloe', 'Dan', 'Elif', 'Femi', 'Grace', 'Hugo', 'Ines', 'Jon', 'Kai', 'Lena', 'Mo', 'Nia', 'Omar'];
+  const LAST = ['Adams', 'Brown', 'Costa', 'Diaz', 'Evans', 'Fischer'];
+  const listId = newId();
+  await db.insert(contactLists).values({ id: listId, orgId: acme, name: 'Q4 customers', createdBy: acmeAdmin.id });
+  const people = Array.from({ length: 30 }, (_, i) => ({
+    id: newId(),
+    orgId: acme,
+    email: `customer${i + 1}@example.com`,
+    firstName: FIRST[i % FIRST.length]!,
+    lastName: LAST[i % LAST.length]!,
+    attributes: { plan: pick(['free', 'team', 'business']), region: pick(['EMEA', 'Americas', 'APAC']) },
+    unsubscribedAt: i === 3 || i === 17 ? new Date() : null,
+    bouncedAt: i === 9 ? new Date() : null,
+  }));
+  await db.insert(contacts).values(people);
+  await db.insert(contactListMembers).values(people.map((c) => ({ orgId: acme, listId, contactId: c.id })));
+
+  const distributionId = newId();
+  await db.insert(distributions).values({
+    id: distributionId,
+    orgId: acme,
+    surveyId: npsSurveyId,
+    channel: 'email',
+    name: 'Email: Q4 NPS invitation',
+    token: newToken(9),
+    createdBy: acmeCreator.id,
+  });
+  await db.insert(campaigns).values({
+    id: newId(),
+    orgId: acme,
+    surveyId: npsSurveyId,
+    distributionId,
+    listId,
+    name: 'Q4 NPS invitation',
+    subject: 'How likely are you to recommend Acme, {{contact.first_name|there}}?',
+    body: 'Hi {{contact.first_name|there}},\n\nTwo minutes of your time would help us a lot:\n\n{{survey.link}}\n\nThanks,\nThe Acme team',
+    reminderAfterDays: 3,
+    reminderMax: 1,
+    createdBy: acmeCreator.id,
+  });
+
+  // Tag a few detractors for follow-up, with a note on one of them.
+  const { rows: detractors } = await pool.query<{ response_id: string }>(
+    `select distinct a.response_id from answers a join responses r on r.id = a.response_id
+      where a.survey_id = $1 and r.status = 'completed' and a.value_number <= 4 limit 5`,
+    [npsSurveyId],
+  );
+  const followUp = newId();
+  await db.insert(tags).values([
+    { id: followUp, orgId: acme, surveyId: npsSurveyId, name: 'Follow up' },
+    { id: newId(), orgId: acme, surveyId: npsSurveyId, name: 'Pricing' },
+  ]);
+  if (detractors.length) {
+    await db.insert(responseTags).values(detractors.map((d) => ({ orgId: acme, responseId: d.response_id, tagId: followUp })));
+    await db.insert(responseNotes).values({
+      id: newId(),
+      orgId: acme,
+      responseId: detractors[0]!.response_id,
+      authorId: acmeAnalyst.id,
+      body: 'Called the customer: billing confusion after the plan change. Sent a refund.',
+    });
+  }
+}
 
 await seedSurvey({
   orgId: globex,

@@ -69,8 +69,10 @@ export const put = <T>(path: string, body?: unknown, headers?: Record<string, st
 export const del = <T = void>(path: string) => api<T>('DELETE', path);
 
 /** Upload one file as multipart/form-data (same CSRF and organization headers as `api`). */
-export async function upload<T>(path: string, file: File): Promise<T> {
+export async function upload<T>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
   const form = new FormData();
+  // Fields first: the server reads them before the file.
+  for (const [name, value] of Object.entries(fields)) form.append(name, value);
   form.append('file', file, file.name);
   let res: Response;
   try {

@@ -13,6 +13,11 @@ import { registerOrgRoutes } from './modules/org';
 import { registerRespondentRoutes } from './modules/respondent';
 import { registerResultsRoutes } from './modules/results';
 import { registerFileRoutes } from './modules/files';
+import { registerCampaignRoutes } from './modules/campaigns';
+import { registerContactRoutes } from './modules/contacts';
+import { registerLiveRoutes } from './modules/live';
+import { registerResponseToolRoutes } from './modules/response-tools';
+import { registerExportRoutes } from './modules/exports';
 import { registerTemplateRoutes } from './modules/templates';
 import { registerThemeRoutes } from './modules/themes';
 import { registerSurveyRoutes } from './modules/surveys';
@@ -151,6 +156,11 @@ export async function buildApp(
   registerThemeRoutes(app, deps);
   registerTemplateRoutes(app, deps);
   registerFileRoutes(app, deps);
+  registerContactRoutes(app, deps);
+  registerCampaignRoutes(app, deps);
+  registerLiveRoutes(app, deps);
+  registerResponseToolRoutes(app, deps);
+  registerExportRoutes(app, deps);
 
   return app;
 }

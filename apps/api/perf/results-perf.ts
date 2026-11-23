@@ -1,6 +1,7 @@
 /**
- * Analytics performance check (acceptance criterion: on a 50k-response survey, the unfiltered
- * summary returns in < 1 s and a filtered summary in < 5 s at p95).
+ * Analytics performance check (acceptance criteria: on a 50k-response survey, the unfiltered
+ * summary returns in < 1 s and a filtered summary in < 5 s at p95; Phase 2B: answer filters with up
+ * to 4 segments in < 5 s at p95, and a 50k-response XLSX export in < 2 minutes).
  *
  * Prerequisite: `pnpm db:seed:large`. Runs the API in-process against the dev database and
  * writes a report to perf/results-summary.md at the repo root.
@@ -8,10 +9,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEV_PASSWORD } from '@survey/db/dev';
-import { findRepoRoot } from '@survey/db';
+import { eq } from 'drizzle-orm';
+import { findRepoRoot, surveys, withTenant } from '@survey/db';
 import { buildApp } from '../src/app';
 import { loadConfig } from '../src/config';
 import { closeDeps, createDeps } from '../src/deps';
+import { buildExportFile } from '../src/jobs/exports';
 
 const RUNS = 20;
 const config = loadConfig({ logLevel: 'warn', emailTransport: 'memory' });
@@ -34,15 +37,21 @@ const detail = (
   await app.inject({ method: 'GET', url: `/api/v1/surveys/${survey.id}`, headers: { cookie } })
 ).json();
 
-async function measure(label: string, url: string) {
+const csrf = login.json().csrfToken as string;
+
+async function measure(label: string, url: string, body?: unknown) {
   const times: number[] = [];
   let source = '';
   for (let i = 0; i < RUNS + 2; i++) {
     const start = performance.now();
-    const res = await app.inject({ method: 'GET', url, headers: { cookie } });
+    const res = await app.inject(
+      body
+        ? { method: 'POST', url, headers: { cookie, 'x-csrf-token': csrf, 'content-type': 'application/json' }, payload: JSON.stringify(body) }
+        : { method: 'GET', url, headers: { cookie } },
+    );
     const ms = performance.now() - start;
     if (res.statusCode !== 200) throw new Error(`${label}: HTTP ${res.statusCode} ${res.body}`);
-    source = res.json().source;
+    source = res.json().source ?? res.json().overall?.source ?? '';
     if (i >= 2) times.push(ms); // first two runs warm caches and connections
   }
   times.sort((a, b) => a - b);
@@ -52,6 +61,14 @@ async function measure(label: string, url: string) {
 
 const since = new Date(Date.now() - 14 * 86_400_000).toISOString();
 const base = `/api/v1/surveys/${survey.id}/results/summary`;
+// Phase 2B: answer filters and segments on the seeded NPS questions.
+const version = (await app.inject({ method: 'GET', url: `/api/v1/surveys/${survey.id}/versions`, headers: { cookie } })).json()[0];
+const definition = (await app.inject({ method: 'GET', url: `/api/v1/surveys/${survey.id}/versions/${version.id}`, headers: { cookie } })).json().definition;
+const questions = definition.pages.flatMap((p: { elements: { kind: string; key: string; type: string; options?: { key: string }[] }[] }) => p.elements);
+const nps = questions.find((q: { type: string }) => q.type === 'nps');
+const plan = questions.find((q: { type: string }) => q.type === 'single_choice');
+const query = `/api/v1/surveys/${survey.id}/results/query`;
+const planIs = (i: number) => ({ question: plan.key, op: 'eq', value: plan.options[i].key });
 const results = [
   { ...(await measure('Unfiltered summary', base)), target: 1000 },
   {
@@ -65,7 +82,25 @@ const results = [
     )),
     target: 5000,
   },
+  {
+    ...(await measure('Answer filter (NPS 0-6 AND plan)', query, { filter: { all: [{ question: nps.key, op: 'lte', value: 6 }, planIs(0)] } })),
+    target: 5000,
+  },
+  {
+    ...(await measure('4 segments side by side (by plan)', query, {
+      segments: [0, 1, 2, 3].map((i) => ({ name: `Plan ${i + 1}`, filter: planIs(i) })),
+    })),
+    target: 5000,
+  },
 ];
+
+// Phase 2B: a full XLSX export of every completed response, as the export job builds it.
+const xlsxStart = performance.now();
+const orgId = login.json().activeOrg.id as string;
+const [rowSurvey] = await withTenant(deps.pool, orgId, (tx) => tx.db.select().from(surveys).where(eq(surveys.id, survey.id)));
+const file = await buildExportFile(deps, orgId, rowSurvey!, 'xlsx', {});
+const xlsxMs = performance.now() - xlsxStart;
+const xlsxRow = `| XLSX export of ${file.rowCount.toLocaleString('en-US')} responses (${(file.buffer.length / 1024 / 1024).toFixed(1)} MB) | worker | ${(xlsxMs / 1000).toFixed(1)} s | - | - | < 120 s | ${xlsxMs < 120_000 ? 'PASS' : 'FAIL'} |`;
 
 const rows = results
   .map(
@@ -84,6 +119,7 @@ Generated ${new Date().toISOString()} by \`pnpm perf:results\` against the local
 | Scenario | Source | p50 | p95 | max | Target (p95) | Result |
 |---|---|---|---|---|---|---|
 ${rows}
+${xlsxRow}
 `;
 
 const dir = resolve(findRepoRoot(), 'perf');
@@ -93,4 +129,4 @@ console.log(report);
 
 await app.close();
 await closeDeps(deps);
-process.exit(results.every((r) => r.p95 < r.target) ? 0 : 1);
+process.exit(results.every((r) => r.p95 < r.target) && xlsxMs < 120_000 ? 0 : 1);

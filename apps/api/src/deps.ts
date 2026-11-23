@@ -5,6 +5,7 @@ import { createTurnstileVerifier, fakeCaptcha, type CaptchaVerifier } from './in
 import { Jobs } from './infra/jobs';
 import { createMailer, type Mailer } from './infra/mailer';
 import { createClamAvScanner, disabledScanner, fakeScanner, type MalwareScanner } from './infra/scanner';
+import { createSnsVerifier, type SnsVerifier } from './infra/sns';
 import { createMemoryStorage, createS3Storage, type ObjectStorage } from './infra/storage';
 
 /** Everything the HTTP app and the worker need, created once per process. */
@@ -17,6 +18,8 @@ export interface Deps {
   storage: ObjectStorage;
   scanner: MalwareScanner;
   captcha: CaptchaVerifier;
+  /** SES bounce/complaint notifications arrive through SNS. Replaceable in tests. */
+  sns: SnsVerifier;
 }
 
 export async function createDeps(config: Config, opts: { worker: boolean }): Promise<Deps> {
@@ -32,7 +35,7 @@ export async function createDeps(config: Config, opts: { worker: boolean }): Pro
   const scanner =
     config.scanner === 'clamav' ? createClamAvScanner(config.clamav.host, config.clamav.port) : config.scanner === 'fake' ? fakeScanner : disabledScanner;
   const captcha = config.captcha === 'fake' ? fakeCaptcha : createTurnstileVerifier(config.turnstile.siteKey, config.turnstile.secretKey);
-  return { config, pool, redis, jobs, mailer, storage, scanner, captcha };
+  return { config, pool, redis, jobs, mailer, storage, scanner, captcha, sns: createSnsVerifier() };
 }
 
 export async function closeDeps(deps: Deps): Promise<void> {

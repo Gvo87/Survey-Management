@@ -14,6 +14,7 @@ import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { fileTypeFromBuffer } from 'file-type';
 import {
+  ResumeLinkRequest,
   SaveResponseRequest,
   UnlockRequest,
   type CompleteResult,
@@ -41,11 +42,14 @@ import {
 } from '@survey/core';
 import {
   answers as answersTable,
+  campaigns,
+  contacts,
   distributions,
   files,
   fromCells,
   newId,
   readAccess,
+  recipients,
   responses,
   sha256,
   surveys,
@@ -63,6 +67,7 @@ import { AppError, conflict, forbidden, gone, notFound, unprocessable } from '..
 import { deviceType, toHour } from '../lib/misc';
 import { hmac, ipHash, safeEqual, testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
+import { RECIPIENT_TOKEN } from '../lib/campaign-email';
 import { effectiveStatus } from './surveys';
 
 type SurveyRow = typeof surveys.$inferSelect;
@@ -293,11 +298,43 @@ export async function detectMime(buffer: Buffer, filename: string): Promise<stri
   }
 }
 
+/** The campaign recipient behind a personal link token, if it belongs to this survey (tenant scoped). */
+async function recipientFor(tx: Tx, surveyId: string, token: string | undefined) {
+  if (!token || !RECIPIENT_TOKEN.test(token)) return null;
+  const [row] = await tx.db
+    .select({ recipient: recipients, contact: contacts, surveyId: campaigns.surveyId })
+    .from(recipients)
+    .innerJoin(campaigns, eq(campaigns.id, recipients.campaignId))
+    .innerJoin(contacts, eq(contacts.id, recipients.contactId))
+    .where(eq(recipients.tokenHash, sha256(token)));
+  return row && row.surveyId === surveyId ? row : null;
+}
+
+/** Contact fields available to {{contact.…}} piping. Never for anonymous surveys. */
+function contactFields(c: typeof contacts.$inferSelect): Record<string, string> {
+  return {
+    ...c.attributes,
+    email: c.email,
+    ...(c.firstName ? { first_name: c.firstName } : {}),
+    ...(c.lastName ? { last_name: c.lastName } : {}),
+  };
+}
+
+async function contactForResponse(tx: Tx, response: ResponseRow): Promise<Record<string, string> | undefined> {
+  if (!response.recipientId) return undefined;
+  const [row] = await tx.db
+    .select({ contact: contacts })
+    .from(recipients)
+    .innerJoin(contacts, eq(contacts.id, recipients.contactId))
+    .where(eq(recipients.id, response.recipientId));
+  return row ? contactFields(row.contact) : undefined;
+}
+
 export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void {
   const { pool, redis, config } = deps;
   type Params = { Params: { publicId: string } };
 
-  app.get<Params & { Querystring: { d?: string } }>('/r/v1/s/:publicId', async (req, reply): Promise<RespondentSurvey> => {
+  app.get<Params & { Querystring: { d?: string; t?: string } }>('/r/v1/s/:publicId', async (req, reply): Promise<RespondentSurvey> => {
     reply.header('cache-control', 'no-store');
     const { orgId, surveyId } = await resolveSurvey(deps, req.params.publicId);
     const keyHash = responseKeyHash(req, false);
@@ -338,13 +375,17 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
       const open = resume?.status === 'in_progress' ? canContinue(survey, access) : access.open;
       const locked = open && !resume && !hasAccessToken(req, config.sessionSecret, survey);
       const theme = await themeFor(tx, survey);
+      const recipient = await recipientFor(tx, survey.id, typeof req.query.t === 'string' ? req.query.t : undefined);
       const base = {
         survey: { publicId: survey.publicId, title: survey.title, anonymous: survey.anonymous, onePerBrowser: settings.onePerBrowser },
         resume,
         theme,
         captchaSiteKey: settings.captcha && !resume ? deps.captcha.siteKey : null,
         presetHiddenFields,
+        contact: recipient && !survey.anonymous ? contactFields(recipient.contact) : null,
       };
+      // One response per recipient: a used personal link says so (or resumes, via the response key).
+      if (recipient?.recipient.status === 'responded' && !resume) return { ...base, access: { state: 'already_responded' }, version: null };
       if (access.code === 'not_yet_open' && !open)
         return { ...base, access: { state: 'not_yet_open', opensAt: settings.opensAt! }, version: null };
       if (locked) return { ...base, access: { state: 'password_required' }, version: null };
@@ -436,10 +477,19 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
               : and(eq(distributions.surveyId, surveyId), eq(distributions.isDefault, true)),
           );
         if (!link || link.disabledAt) throw gone('link_disabled', 'This link is no longer active.');
+        let recipientId: string | null = null;
+        const recipient = await recipientFor(tx, surveyId, start.recipientToken);
+        if (recipient) {
+          if (recipient.recipient.status === 'responded') throw conflict('already_responded', 'You have already responded to this survey.');
+          if (!survey.anonymous) {
+            const [taken] = await tx.db.select({ id: responses.id }).from(responses).where(eq(responses.recipientId, recipient.recipient.id));
+            if (taken) throw conflict('already_responded', 'You have already started this survey on another device. Use the link from your email there.');
+            recipientId = recipient.recipient.id;
+          }
+        }
         if (start.versionId !== survey.currentVersionId)
           throw conflict('version_changed', 'This survey was just updated. Reload the page to continue.');
         await rateLimit(redis, `resp:new:${surveyId}:${ipHash(config.sessionSecret, req.ip)}`, 20, 60);
-
         const definition = await loadDefinition(deps, tx, start.versionId);
         const now = new Date();
         const startedAt = survey.anonymous ? toHour(now) : now;
@@ -461,6 +511,8 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
             deviceType: deviceType(req.headers['user-agent']),
             startedAt,
             lastActivityAt: startedAt,
+            // Anonymous surveys never link a response to a recipient (also enforced by a trigger).
+            recipientId,
           })
           .returning();
       } else if (response.status === 'in_progress' && !canContinue(survey, access)) {
@@ -510,8 +562,8 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
   });
 
   /** The end screen for a finished response, with piping applied (and the redirect, if any). */
-  function endScreen(definition: SurveyDefinition, response: ResponseRow, answers: Answers): CompleteResult {
-    const ctx = { def: definition, answers, hidden: response.hiddenFields };
+  function endScreen(definition: SurveyDefinition, response: ResponseRow, answers: Answers, contact?: Record<string, string>): CompleteResult {
+    const ctx = { def: definition, answers, hidden: response.hiddenFields, contact };
     const disqualified = response.status === 'disqualified';
     const screen = disqualified
       ? (definition.settings.disqualified ?? { title: 'Thank you for your time', body: "Unfortunately you don't qualify for this survey." })
@@ -534,7 +586,8 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
     return withTenant(pool, saved.orgId, async (tx) => {
       const [response] = await tx.db.select().from(responses).where(eq(responses.id, saved.response.id)).for('update');
       if (!response) throw notFound('Response');
-      if (response.status !== 'in_progress') return endScreen(definition, response, await loadAnswerValues(tx, definition, response));
+      if (response.status !== 'in_progress')
+        return endScreen(definition, response, await loadAnswerValues(tx, definition, response), await contactForResponse(tx, response));
 
       const stored = await loadAnswerValues(tx, definition, response);
       const result = checkCompletion(definition, stored, response.hiddenFields);
@@ -571,6 +624,17 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
         durationMs = start ? now.getTime() - Number(start) : null;
         await redis.del(key).catch(() => {});
       }
+      // Campaign tracking. Anonymous surveys mark the recipient (hour precision) without linking the response.
+      if (!response.isTest) {
+        if (response.recipientId) {
+          await tx.db.update(recipients).set({ status: 'responded', respondedAt: now }).where(eq(recipients.id, response.recipientId));
+        } else if (survey.anonymous && saved.body.start?.recipientToken) {
+          const recipient = await recipientFor(tx, survey.id, saved.body.start.recipientToken);
+          if (recipient?.recipient.status === 'responded')
+            throw conflict('already_responded', 'You have already responded to this survey.');
+          if (recipient) await tx.db.update(recipients).set({ status: 'responded', respondedAt: toHour(now) }).where(eq(recipients.id, recipient.recipient.id));
+        }
+      }
       const lastPage = result.path.at(-1) ?? definition.pages.at(-1)!.key;
       const [finished] = await tx.db
         .update(responses)
@@ -599,8 +663,40 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
         }
         await deps.jobs.enqueue(tx, 'aggregates.response-completed', { orgId: saved.orgId, surveyId: survey.id, responseId: response.id });
       }
-      return endScreen(definition, finished!, result.answers);
+      return endScreen(definition, finished!, result.answers, await contactForResponse(tx, finished!));
     });
+  });
+
+  /**
+   * Email a link to continue on another device. The link carries the response key in the URL
+   * fragment, which browsers never send to servers. Not available for anonymous surveys, and the
+   * address isn't stored.
+   */
+  app.post<Params>('/r/v1/s/:publicId/response/resume-link', async (req, reply) => {
+    const key = req.headers['x-response-key'];
+    const keyHash = responseKeyHash(req, true);
+    const { email } = parse(ResumeLinkRequest, req.body);
+    const { orgId, surveyId } = await resolveSurvey(deps, req.params.publicId);
+    await rateLimit(redis, `resume-link:${keyHash.toString('hex')}`, 3, 3600);
+    const survey = await withTenant(pool, orgId, async (tx) => {
+      const [row] = await tx.db.select().from(surveys).where(eq(surveys.id, surveyId));
+      if (!row) throw notFound('Survey');
+      if (row.anonymous) throw forbidden("Anonymous surveys can't email a resume link.", 'not_available');
+      const [response] = await tx.db
+        .select({ status: responses.status })
+        .from(responses)
+        .where(and(eq(responses.surveyId, surveyId), eq(responses.responseKeyHash, keyHash)));
+      if (!response) throw conflict('not_started', 'Answer at least one page first.');
+      if (response.status !== 'in_progress') throw conflict('already_completed', 'This response has already been submitted.');
+      return row;
+    });
+    const link = `${config.respondentUrl}/s/${survey.publicId}#k=${String(key)}`;
+    await deps.mailer.send({
+      to: email,
+      subject: `Continue "${survey.title}"`.slice(0, 200),
+      text: `You asked for a link to continue this survey later:\n\n${link}\n\nAnyone with this link can see and change your answers, so don't share it.\n`,
+    });
+    return reply.code(202).send({ sent: true });
   });
 
   // ── File uploads ─────────────────────────────────────────────────────────

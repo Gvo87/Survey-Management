@@ -6,6 +6,7 @@ import { errorMessage, get, patch, post } from '../../api';
 import { Alert, Badge, Button, Card, Checkbox, CopyButton, Dialog, TextField } from '../../components/ui';
 import { formatDateTime, formatNumber } from '../../lib/format';
 import { useSurvey } from './SurveyLayout';
+import { CampaignsCard, EmbedCard } from './Campaigns';
 
 export function DistributePage() {
   const { survey, refresh } = useSurvey();
@@ -24,7 +25,7 @@ export function DistributePage() {
   });
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
       <div className="flex flex-col gap-6">
         {!survey.publicUrl ? (
           <Alert tone="info">
@@ -93,6 +94,8 @@ export function DistributePage() {
             ))}
           </ul>
         </Card>
+        <CampaignsCard survey={survey} />
+        <EmbedCard survey={survey} links={links.data ?? []} />
         <HiddenFieldsHelp survey={survey} />
       </div>
       <AccessSettings survey={survey} onSaved={refresh} />

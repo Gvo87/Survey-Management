@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { PageResult, ResponseDetail, ResponseSummary } from '@survey/contracts';
-import { del, errorMessage, get } from '../../api';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { BulkDeleteResult, PageResult, ResponseDetail, ResponseSummary, Tag } from '@survey/contracts';
+import { useAuth } from '../../auth';
+import { del, errorMessage, get, post, put } from '../../api';
 import {
   Alert,
   Badge,
@@ -12,6 +13,8 @@ import {
   ConfirmDialog,
   EmptyState,
   SelectField,
+  TextArea,
+  TextField,
 } from '../../components/ui';
 import { formatDateTime, formatDuration } from '../../lib/format';
 import { useSurvey } from './SurveyLayout';
@@ -45,24 +48,62 @@ export function ResponsesPage() {
   const [status, setStatus] = useState<'all' | 'completed' | 'in_progress' | 'disqualified'>('all');
   const [includeTest, setIncludeTest] = useState(false);
   const [flag, setFlag] = useState('');
+  const [text, setText] = useState('');
+  const [q, setQ] = useState('');
+  const [tag, setTag] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    const t = setTimeout(() => setQ(text.trim()), 300);
+    return () => clearTimeout(t);
+  }, [text]);
+  const tags = useQuery({ queryKey: ['tags', survey.id], queryFn: () => get<Tag[]>(`/surveys/${survey.id}/tags`) });
   const query = useInfiniteQuery({
-    queryKey: ['responses', survey.id, status, includeTest, flag],
+    queryKey: ['responses', survey.id, status, includeTest, flag, q, tag],
     queryFn: ({ pageParam }) => {
       const p = new URLSearchParams({ status, limit: '50' });
       if (includeTest) p.set('includeTest', 'true');
       if (flag) p.set('flag', flag);
+      if (q) p.set('q', q);
+      if (tag) p.set('tag', tag);
       if (pageParam) p.set('cursor', pageParam);
-      return get<PageResult<ResponseSummary>>(`/surveys/${survey.id}/responses?${p}`);
+      return get<PageResult<ResponseSummary> & { total?: number }>(`/surveys/${survey.id}/responses?${p}`);
     },
     initialPageParam: '',
     getNextPageParam: (last) => last.nextCursor ?? undefined,
     refetchInterval: 30_000,
   });
   const rows = query.data?.pages.flatMap((p) => p.data) ?? [];
+  const total = query.data?.pages[0]?.total ?? 0;
+  const narrowed = Boolean(q || tag || flag || status !== 'all');
+  const canDelete = survey.myRole !== 'viewer';
+  const bulk = useMutation({
+    mutationFn: () =>
+      post<BulkDeleteResult>(`/surveys/${survey.id}/responses/bulk-delete`, {
+        scope: { status, includeTest, ...(q ? { q } : {}), ...(tag ? { tag } : {}), ...(flag ? { flag } : {}) },
+        expectedCount: total,
+      }),
+    onSuccess: () => {
+      setConfirming(false);
+      void queryClient.invalidateQueries({ queryKey: ['responses', survey.id] });
+      void queryClient.invalidateQueries({ queryKey: ['results', survey.id] });
+    },
+  });
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end gap-4">
+        <TextField label="Search answers" type="search" className="min-w-56" placeholder="Words in open answers" value={text} onChange={(e) => setText(e.target.value)} />
+        {tags.data?.length ? (
+          <SelectField label="Tag" value={tag} onChange={(e) => setTag(e.target.value)}>
+            <option value="">Any</option>
+            {tags.data.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name} ({t.responseCount})
+              </option>
+            ))}
+          </SelectField>
+        ) : null}
         <SelectField
           label="Status"
           value={status}
@@ -88,6 +129,21 @@ export function ResponsesPage() {
           onChange={(e) => setIncludeTest(e.target.checked)}
         />
       </div>
+      {query.data ? (
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="text-muted" aria-live="polite">
+            {total.toLocaleString()} {total === 1 ? 'response' : 'responses'}
+            {narrowed ? ' match' : ''}
+          </span>
+          {canDelete && narrowed && total > 0 ? (
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+              Delete these {total.toLocaleString()}…
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {bulk.error ? <Alert tone="error">{errorMessage(bulk.error)}</Alert> : null}
+      {bulk.data ? <Alert tone="success">Deleted {bulk.data.deleted.toLocaleString()} responses. Results were updated.</Alert> : null}
       {query.error ? <Alert tone="error">{errorMessage(query.error)}</Alert> : null}
       {query.isPending ? <p className="text-sm text-muted">Loading…</p> : null}
       {!query.isPending && rows.length === 0 ? (
@@ -132,6 +188,11 @@ export function ResponsesPage() {
                     {STATUS_LABEL[r.status]} {r.isTest ? <Badge>Test</Badge> : null}
                     <span className="ml-1 text-xs text-muted">v{r.versionNumber}</span>
                     <Flags flags={r.qualityFlags} />
+                    {r.tags.map((t) => (
+                      <Badge key={t.id} className="ml-1 bg-brand-50 text-brand-700">
+                        {t.name}
+                      </Badge>
+                    ))}
                   </td>
                   <td className="tabular px-4 py-3">{formatDuration(r.durationSec)}</td>
                   <td className="hidden px-4 py-3 text-muted md:table-cell">{r.distributionName ?? '-'}</td>
@@ -154,6 +215,16 @@ export function ResponsesPage() {
           Load more
         </Button>
       ) : null}
+      <ConfirmDialog
+        open={confirming}
+        title={`Delete ${total.toLocaleString()} responses?`}
+        message="Every response that matches the current search and filters is permanently deleted with its answers, files, tags and notes, and removed from results. This can't be undone, and it's recorded in the audit log."
+        confirmLabel={`Delete ${total.toLocaleString()} responses`}
+        danger
+        busy={bulk.isPending}
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => bulk.mutate()}
+      />
     </div>
   );
 }
@@ -242,6 +313,8 @@ export function ResponseDetailPage() {
             </dl>
           </Card>
           <div className="flex flex-col gap-4">
+            <TagsCard surveyId={survey.id} responseId={r.id} tags={r.tags} onChange={() => void query.refetch()} />
+            <NotesCard surveyId={survey.id} responseId={r.id} notes={r.notes} onChange={() => void query.refetch()} />
             <Card title="Details">
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
                 <dt className="text-muted">Status</dt>
@@ -257,6 +330,15 @@ export function ResponseDetailPage() {
                           <strong>{FLAG_LABEL[f]?.label ?? f}</strong>: {FLAG_LABEL[f]?.hint}
                         </div>
                       ))}
+                    </dd>
+                  </>
+                ) : null}
+                {r.contact ? (
+                  <>
+                    <dt className="text-muted">Contact</dt>
+                    <dd className="break-all">
+                      {r.contact.name ? `${r.contact.name} · ` : ''}
+                      {r.contact.email}
                     </dd>
                   </>
                 ) : null}
@@ -302,5 +384,110 @@ export function ResponseDetailPage() {
         onConfirm={() => void remove()}
       />
     </div>
+  );
+}
+
+function TagsCard({ surveyId, responseId, tags, onChange }: { surveyId: string; responseId: string; tags: { id: string; name: string }[]; onChange: () => void }) {
+  const queryClient = useQueryClient();
+  const all = useQuery({ queryKey: ['tags', surveyId], queryFn: () => get<Tag[]>(`/surveys/${surveyId}/tags`) });
+  const [name, setName] = useState('');
+  const changed = () => {
+    onChange();
+    void queryClient.invalidateQueries({ queryKey: ['tags', surveyId] });
+    void queryClient.invalidateQueries({ queryKey: ['responses', surveyId] });
+  };
+  const add = useMutation({
+    mutationFn: async (tagName: string) => {
+      const tag = await post<Tag>(`/surveys/${surveyId}/tags`, { name: tagName });
+      await put(`/surveys/${surveyId}/responses/${responseId}/tags/${tag.id}`);
+    },
+    onSuccess: () => {
+      setName('');
+      changed();
+    },
+  });
+  const remove = useMutation({ mutationFn: (tagId: string) => del(`/surveys/${surveyId}/responses/${responseId}/tags/${tagId}`), onSuccess: changed });
+  const suggestions = (all.data ?? []).filter((t) => !tags.some((x) => x.id === t.id));
+  return (
+    <Card title="Tags">
+      <ul className="mb-3 flex flex-wrap gap-2" aria-label="Tags on this response">
+        {tags.length === 0 ? <li className="text-sm text-muted">No tags yet.</li> : null}
+        {tags.map((t) => (
+          <li key={t.id}>
+            <Badge className="bg-brand-50 text-brand-700">
+              {t.name}
+              <button type="button" className="ml-1 rounded px-0.5 hover:bg-brand-100" aria-label={`Remove tag ${t.name}`} onClick={() => remove.mutate(t.id)}>
+                ✕
+              </button>
+            </Badge>
+          </li>
+        ))}
+      </ul>
+      <form
+        className="flex items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim()) add.mutate(name.trim());
+        }}
+      >
+        <TextField label="Add a tag" className="min-w-0 flex-1" list={`tags-${responseId}`} value={name} onChange={(e) => setName(e.target.value)} maxLength={40} />
+        <datalist id={`tags-${responseId}`}>
+          {suggestions.map((t) => (
+            <option key={t.id} value={t.name} />
+          ))}
+        </datalist>
+        <Button type="submit" size="sm" className="mb-1" busy={add.isPending}>
+          Add
+        </Button>
+      </form>
+      {add.error || remove.error ? <p className="mt-2 text-sm text-red-700">{errorMessage(add.error ?? remove.error)}</p> : null}
+    </Card>
+  );
+}
+
+function NotesCard({ surveyId, responseId, notes, onChange }: { surveyId: string; responseId: string; notes: ResponseDetail['notes']; onChange: () => void }) {
+  const { me } = useAuth();
+  const [body, setBody] = useState('');
+  const add = useMutation({
+    mutationFn: () => post(`/surveys/${surveyId}/responses/${responseId}/notes`, { body }),
+    onSuccess: () => {
+      setBody('');
+      onChange();
+    },
+  });
+  const remove = useMutation({ mutationFn: (id: string) => del(`/surveys/${surveyId}/responses/${responseId}/notes/${id}`), onSuccess: onChange });
+  const isAdmin = me?.activeOrg?.role === 'org_admin';
+  return (
+    <Card title="Notes">
+      <p className="mb-3 text-xs text-muted">Visible to your team only, never to the respondent.</p>
+      <ul className="mb-3 flex flex-col gap-3">
+        {notes.map((n) => (
+          <li key={n.id} className="rounded-lg bg-gray-50 p-3 text-sm">
+            <p className="whitespace-pre-wrap">{n.body}</p>
+            <p className="mt-1 flex items-center gap-2 text-xs text-muted">
+              {n.author ?? 'Former member'} · {formatDateTime(n.createdAt)}
+              {n.authorId === me?.user.id || isAdmin ? (
+                <button type="button" className="underline" onClick={() => remove.mutate(n.id)}>
+                  Delete
+                </button>
+              ) : null}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <form
+        className="flex flex-col gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (body.trim()) add.mutate();
+        }}
+      >
+        <TextArea label="Add a note" rows={3} value={body} onChange={(e) => setBody(e.target.value)} maxLength={5000} />
+        <Button type="submit" size="sm" className="self-start" busy={add.isPending} disabled={!body.trim()}>
+          Save note
+        </Button>
+      </form>
+      {add.error ? <p className="mt-2 text-sm text-red-700">{errorMessage(add.error)}</p> : null}
+    </Card>
   );
 }

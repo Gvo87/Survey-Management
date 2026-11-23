@@ -15,6 +15,14 @@ export interface JobPayloads {
   'sessions.cleanup': Record<string, never>;
   'files.scan': { orgId: string; fileId: string };
   'files.delete-objects': { keys: string[] };
+  'contacts.import': { orgId: string; importId: string };
+  /** `scheduledAt` guards against a rescheduled or cancelled campaign's stale job. */
+  'campaigns.start': { orgId: string; campaignId: string; scheduledAt: string };
+  'campaigns.send': { orgId: string; campaignId: string };
+  'campaigns.reminders': Record<string, never>;
+  'exports.generate': { orgId: string; exportId: string };
+  'exports.cleanup': Record<string, never>;
+  'reports.tick': Record<string, never>;
 }
 
 /**
@@ -37,11 +45,11 @@ export class Jobs {
     return new Jobs(boss);
   }
 
-  async enqueue<Q extends QueueName>(tx: Tx | null, name: Q, data: JobPayloads[Q]): Promise<void> {
+  async enqueue<Q extends QueueName>(tx: Tx | null, name: Q, data: JobPayloads[Q], options: { startAfter?: Date } = {}): Promise<void> {
     const db = tx
       ? { executeSql: (text: string, values: unknown[]) => tx.client.query(text, values) }
       : undefined;
-    await this.boss.send(name, data as object, db ? { db } : {});
+    await this.boss.send(name, data as object, { ...options, ...(db ? { db } : {}) });
   }
 
   async stop(): Promise<void> {

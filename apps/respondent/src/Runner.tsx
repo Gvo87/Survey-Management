@@ -36,6 +36,10 @@ export interface RunnerProps {
   anonymous?: boolean;
   /** Hidden fields (URL parameters): conditions and piping can use them. */
   hidden?: Record<string, string>;
+  /** Contact fields from a personal campaign link, for {{contact.…}} piping. */
+  contact?: Record<string, string> | null;
+  /** Shown under the navigation (e.g. "Email me a link to finish later"). */
+  footer?: ReactNode;
   logoUrl?: string | null;
   initialAnswers?: Record<string, AnswerValue>;
   initialPageKey?: string;
@@ -100,7 +104,7 @@ export function Runner(props: RunnerProps) {
     () => ({ answers: pathAnswers(definition, answers, page.key, hidden), hidden }),
     [definition, answers, page.key, hidden],
   );
-  const piped = (text: string) => pipe(text, { def: definition, answers: ctx.answers, hidden });
+  const piped = (text: string) => pipe(text, { def: definition, answers: ctx.answers, hidden, contact: props.contact ?? undefined });
   const { index, total, percent } = progress(definition, page.key);
   const step = nextStep(definition, page.key, ctx);
   const isLast = step.kind !== 'page';
@@ -248,6 +252,7 @@ export function Runner(props: RunnerProps) {
         </div>
         {props.status ? <div className="status">{props.status}</div> : null}
       </form>
+      {props.footer}
       <div className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </div>

@@ -38,6 +38,11 @@ export function AppShell() {
             <NavLink to="/surveys" className={link}>
               Surveys
             </NavLink>
+            {org && org.role !== 'analyst' ? (
+              <NavLink to="/contacts" className={link}>
+                Contacts
+              </NavLink>
+            ) : null}
             <NavLink to="/settings/members" className={link}>
               Members
             </NavLink>

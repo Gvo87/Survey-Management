@@ -19,6 +19,8 @@ export interface LocalState {
   start: {
     distributionToken?: string;
     testToken?: string;
+    /** Phase 2B: personal campaign link token. */
+    recipientToken?: string;
     hiddenFields: Record<string, string>;
     locale: string;
   };

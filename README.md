@@ -1,20 +1,22 @@
 # Survey Management System
 
-A multi-tenant platform for building, publishing and analysing surveys. **Phase 1 (MVP) and Phase 2A (builder
-power) are implemented:**
+A multi-tenant platform for building, publishing and analysing surveys. **Phase 1 (MVP), Phase 2A (builder
+power) and Phase 2B (reach and insight) are implemented:**
 
 - authentication, organizations and role-based access
 - a drag-and-drop builder with 16 question types and live preview
 - conditional logic (show/hide, skip, end, screen out; AND/OR/NOT), piping, and a logic map
 - themes, templates, a question bank, file uploads with malware scanning
 - password protection, open and close dates, CAPTCHA, response-quality flags
-- versioned publishing and public links with QR codes
+- versioned publishing and public links with QR codes, and an embed snippet (inline or popup)
+- contacts with CSV import, and email campaigns with personal links, scheduling, reminders and unsubscribe
 - a fast, accessible respondent app that never loses answers
-- a results dashboard, a response viewer and CSV export
+- results with filters, segments, cross-tabs, drop-off and word clouds, updated live
+- a response viewer with search, tags, notes and bulk delete; CSV, Excel and PDF exports, and scheduled reports
 
 Design documents live in [`docs/`](docs/README.md): architecture, data model, API, roadmap, risks. Progress against
-the acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/phase-1-status.md) and
-[`docs/phase-2a-status.md`](docs/phase-2a-status.md).
+the acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/phase-1-status.md),
+[`docs/phase-2a-status.md`](docs/phase-2a-status.md) and [`docs/phase-2b-status.md`](docs/phase-2b-status.md).
 
 ## Quick start
 
@@ -44,7 +46,7 @@ If `corepack enable` fails with a permissions error, run `npm install -g pnpm@10
 | Admin app | http://localhost:5173 |
 | Respondent app | http://localhost:5174/s/{publicId} |
 | API | http://localhost:3000 (`/healthz`, `/readyz`) |
-| Mailpit (catches every email in development) | http://localhost:8025 |
+| Mailpit (catches every email in development, including campaigns) | http://localhost:8025 |
 | S3-compatible storage (uploads, logos) | http://localhost:8333 |
 
 **Malware scanning (optional locally):** uploads are only downloadable after a scan. In development
@@ -70,7 +72,9 @@ docker compose --profile scan up -d clamav
 The seed creates three surveys with about 500 responses each: an NPS survey, an anonymous employee pulse, and an
 event survey with two versions. It also creates a draft survey and a *Product research* survey (300 responses) that
 uses logic and the Phase 2A question types, an *Acme brand* theme set as Acme's default, four global templates and a
-question-bank entry. `pnpm db:seed:large` adds a 50,000-response survey for performance checks.
+question-bank entry. For Phase 2B it adds 30 contacts in a *Q4 customers* list and a draft campaign for the NPS
+survey (send it from the survey's Distribute tab and watch Mailpit), plus tags and a note on NPS responses.
+`pnpm db:seed:large` adds a 50,000-response survey for performance checks.
 
 ## Scripts
 
@@ -80,8 +84,8 @@ question-bank entry. `pnpm db:seed:large` adds a 50,000-response survey for perf
 | `pnpm verify` | Lint, typecheck, unit and integration tests, respondent bundle budget. Run before every PR. |
 | `pnpm test:unit` | `survey-core` engine tests (no database needed) |
 | `pnpm test:integration` | API tests against a real Postgres (`survey_test`) and Redis (db 15) |
-| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, logic (shared vectors), piping XSS, uploads, themes, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. |
-| `pnpm perf:results` | Analytics latency on the 50k seed. Writes `perf/results-summary.md`. |
+| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, logic (shared vectors), piping XSS, uploads, themes, embed on a strict-CSP page, a campaign through Mailpit, live results, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. |
+| `pnpm perf:results` | Analytics latency (including filters and segments) and a 50k-response XLSX export on the 50k seed. Writes `perf/results-summary.md`. |
 | `pnpm --filter @survey/e2e lighthouse` | Respondent load time (LCP) on simulated slow 4G. Writes `perf/lighthouse-respondent.md`. Needs the API running. |
 | `pnpm db:migrate` / `pnpm db:reset` | Apply migrations / drop everything and re-migrate (development only) |
 | `pnpm build` | Production builds (API and worker bundles, both frontends) |
@@ -108,6 +112,11 @@ perf/           Committed performance reports
   the respondent's browser and the server. The server never trusts the client: on completion it replays the logic,
   discards answers to questions the respondent shouldn't have seen, and re-checks every answer. Shared test vectors
   (`packages/survey-core/test-vectors/`) run in all three places.
+- **Email campaigns.** Each recipient's link token is an HMAC of the recipient id (only its hash is stored). The
+  worker claims a batch before sending, so a retry can't email anyone twice, and respects a per-org daily limit.
+  Bounces and complaints from SES (via SNS, signature-checked) suppress an address for every org.
+- **Analytics filters** use the same AND / OR / NOT grammar as survey logic, compiled to parameterised SQL.
+  Anonymous surveys never show a filtered group smaller than 5. Dashboards update live over Server-Sent Events.
 - **Uploads.** Files go through the API, which checks the real type from the bytes and the size before storing them
   in S3. Nothing is downloadable until ClamAV says it's clean; infected files are quarantined and the response is
   flagged.
@@ -139,6 +148,11 @@ Every variable is documented in [`.env.example`](.env.example). For production:
 - Set `SENTRY_DSN` if you want error tracking.
 - Point `S3_*` at your bucket (any S3-compatible store) and run ClamAV: the API refuses to start in production
   unless `MALWARE_SCANNER=clamav`.
+- Send email through SES: point `SMTP_URL` at the SES SMTP endpoint, subscribe an HTTPS endpoint
+  (`<api>/api/v1/webhooks/ses`) to the SNS topic receiving bounce and complaint notifications, and list that topic
+  in `SES_SNS_TOPIC_ARNS`. `EMAILS_PER_ORG_PER_DAY` caps campaign volume per organization.
+- Serve `embed.js` from the respondent origin with a short cache (it's a stable URL), and allow survey pages to be
+  framed (no `X-Frame-Options: DENY` on `/s/*`).
 - Set `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` from Cloudflare if surveys use the CAPTCHA option (the
   `.env.example` values are Cloudflare's always-pass test keys). The respondent app loads the widget from
   `challenges.cloudflare.com`, so allow it in any Content-Security-Policy.

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { RespondentSurvey } from '@survey/contracts';
 import { firstPageKey, type AnswerValue, type SurveyDefinition } from '@survey/core';
-import { ApiError, completeResponse, loadSurvey, removeFile, saveResponse, unlock, uploadFile } from './api';
+import { ApiError, completeResponse, emailResumeLink, loadSurvey, removeFile, saveResponse, unlock, uploadFile } from './api';
 import { Loading, MessagePage, Paragraphs } from './Pages';
 import { Runner, type CompleteOutcome } from './Runner';
 import { clearState, isDone, markDone, newResponseKey, readState, writeState, type LocalState } from './storage';
@@ -28,6 +28,7 @@ type Phase =
   | { kind: 'not_yet_open'; opensAt: string }
   | { kind: 'locked'; title: string }
   | { kind: 'already' }
+  | { kind: 'already_campaign' }
   | { kind: 'not_found' }
   | { kind: 'reload' }
   | { kind: 'error'; message: string };
@@ -52,9 +53,20 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
   const load = useCallback(async () => {
     setPhase({ kind: 'loading' });
     let local = readState(publicId);
+    // A personal campaign link (?t=) or an emailed resume link (#k=) decide which response this is.
+    const recipientToken = /^[A-Za-z0-9_-]{32}$/.test(params.get('t') ?? '') ? params.get('t') : null;
+    const fragmentKey = /^#k=([A-Za-z0-9_-]{22,128})$/.exec(location.hash)?.[1] ?? null;
+    if (fragmentKey) history.replaceState(null, '', location.pathname + location.search);
+    if (fragmentKey && local?.key !== fragmentKey) local = null;
+    let key = fragmentKey ?? recipientToken ?? local?.key ?? null;
     let data: RespondentSurvey;
     try {
-      data = await loadSurvey(publicId, local?.key ?? null, params.get('d'));
+      data = await loadSurvey(publicId, key, params.get('d'), recipientToken);
+      // Anonymous surveys never use the personal token as the response key: look up this browser's own.
+      if (data.survey.anonymous && recipientToken && !fragmentKey && local && key !== local.key) {
+        key = local.key;
+        data = await loadSurvey(publicId, key, params.get('d'), recipientToken);
+      }
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return setPhase({ kind: 'not_found' });
       return setPhase({ kind: 'error', message: "We couldn't load this survey. Check your connection and try again." });
@@ -66,6 +78,10 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
       markDone(publicId);
       return setPhase({ kind: 'already' });
     }
+    if (data.access.state === 'already_responded') {
+      clearState(publicId);
+      return setPhase({ kind: 'already_campaign' });
+    }
     if (data.access.state === 'password_required') return setPhase({ kind: 'locked', title: data.survey.title });
     if (data.access.state === 'not_yet_open') return setPhase({ kind: 'not_yet_open', opensAt: data.access.opensAt });
     if (data.access.state !== 'open' || !data.version)
@@ -76,6 +92,9 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
     document.documentElement.lang = definition.defaultLocale;
     // Local state from an older version the server never saw: start over on the current one.
     if (local && local.versionId !== data.version.id && !data.resume) local = null;
+    // Non-anonymous campaign links: the personal token is the response key, so the same link resumes on any device.
+    const preferredKey = fragmentKey ?? (recipientToken && !data.survey.anonymous ? recipientToken : null);
+    if (local && preferredKey && local.key !== preferredKey) local = null;
     if (!local) {
       const fromUrl: Record<string, string> = {};
       for (const field of definition.hiddenFields) {
@@ -84,7 +103,7 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
       }
       const hiddenFields = effectiveHiddenFields(definition, data.survey.anonymous, fromUrl, data.presetHiddenFields);
       local = {
-        key: newResponseKey(),
+        key: preferredKey ?? newResponseKey(),
         versionId: data.version.id,
         seq: 0,
         ackedSeq: 0,
@@ -94,6 +113,7 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
         start: {
           ...(params.get('d') ? { distributionToken: params.get('d')! } : {}),
           ...(params.get('test') ? { testToken: params.get('test')! } : {}),
+          ...(recipientToken ? { recipientToken } : {}),
           hiddenFields,
           locale: (navigator.language || 'en').slice(0, 10),
         },
@@ -145,6 +165,12 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
           <p>Thank you, we have your answers.</p>
         </MessagePage>
       );
+    case 'already_campaign':
+      return (
+        <MessagePage title="You've already responded" icon="✓">
+          <p>This personal link has already been used to answer the survey. Thank you!</p>
+        </MessagePage>
+      );
     case 'closed':
       return (
         <MessagePage title="This survey is closed">
@@ -176,6 +202,70 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
         </MessagePage>
       );
   }
+}
+
+/** "Finish later": email a link that resumes this response on any device. */
+function ResumeByEmail({ send }: { send: (email: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState('');
+  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  if (!open)
+    return (
+      <p className="resume-later">
+        <button type="button" className="link-button" onClick={() => setOpen(true)}>
+          Finish later? Email me a link
+        </button>
+      </p>
+    );
+  return (
+    <form
+      className="resume-later"
+      noValidate
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(email.trim())) {
+          setState('error');
+          setMessage('Enter a valid email address, like name@example.com.');
+          return;
+        }
+        setState('sending');
+        try {
+          await send(email.trim());
+          setState('sent');
+          setMessage('Sent. Open the link in the email to pick up where you left off, on any device.');
+        } catch (error) {
+          setState('error');
+          setMessage(error instanceof ApiError && error.problem ? error.problem.title : (error as Error).message || "We couldn't send the email. Try again.");
+        }
+      }}
+    >
+      <label className="q-title" htmlFor="resume-email">
+        Email me a link to finish later
+      </label>
+      <p className="q-help" id="resume-email-help">
+        We only use this address to send the link. Anyone with the link can see your answers.
+      </p>
+      <div className="resume-row">
+        <input
+          id="resume-email"
+          className="text-input"
+          type="email"
+          autoComplete="email"
+          value={email}
+          aria-describedby="resume-email-help resume-email-status"
+          aria-invalid={state === 'error' ? true : undefined}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <button type="submit" className="button secondary" disabled={state === 'sending'}>
+          {state === 'sending' ? 'Sending…' : 'Send link'}
+        </button>
+      </div>
+      <p id="resume-email-status" className={state === 'error' ? 'q-error' : 'q-help'} role="status">
+        {message}
+      </p>
+    </form>
+  );
 }
 
 function ThankYou({ title, body, redirectUrl, screenedOut }: { title: string; body: string; redirectUrl: string | null; screenedOut: boolean }) {
@@ -319,6 +409,7 @@ function RunningSurvey({
       if (error instanceof ApiError && !error.retryable) {
         const code = error.problem?.code;
         if (code === 'already_completed') return;
+        if (code === 'already_responded') return onPhase({ kind: 'already_campaign' });
         if (code === 'version_changed') return onPhase({ kind: 'reload' });
         if (code === 'captcha_failed') {
           // Tokens are single-use and expire: get a fresh one.
@@ -408,6 +499,7 @@ function RunningSurvey({
         stopped.current = true;
         clearState(publicId);
         markDone(publicId);
+        if (document.documentElement.dataset.embed) window.parent.postMessage({ type: 'survey:completed' }, '*');
         onPhase({ kind: 'thanks', ...result.thankYou, redirectUrl: result.redirectUrl, screenedOut: result.responseStatus === 'disqualified' });
         return { ok: true };
       } catch (error) {
@@ -426,7 +518,8 @@ function RunningSurvey({
             setSubmitStatus('Please complete the check above again, then submit.');
             return { ok: true };
           }
-          if (problem?.code === 'version_changed') onPhase({ kind: 'reload' });
+          if (problem?.code === 'already_responded') onPhase({ kind: 'already_campaign' });
+          else if (problem?.code === 'version_changed') onPhase({ kind: 'reload' });
           else if (problem?.code === 'password_required') onPhase({ kind: 'locked', title: phase.survey.survey.title });
           else if (error.status === 410) onPhase({ kind: 'closed', message: problem?.title ?? 'This survey is closed.' });
           else onPhase({ kind: 'error', message: problem?.title ?? 'Your response could not be submitted.' });
@@ -450,7 +543,18 @@ function RunningSurvey({
         title={phase.survey.survey.title}
         anonymous={phase.survey.survey.anonymous}
         hidden={phase.hidden}
+        contact={phase.survey.contact}
         logoUrl={phase.survey.theme?.logoUrl}
+        footer={
+          phase.survey.survey.anonymous ? null : (
+            <ResumeByEmail
+              send={async (email) => {
+                await ensureStarted();
+                await emailResumeLink(publicId, state.current.key, email);
+              }}
+            />
+          )
+        }
         seed={phase.state.key}
         initialAnswers={phase.state.answers}
         initialPageKey={phase.state.pageKey}

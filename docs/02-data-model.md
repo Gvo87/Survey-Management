@@ -662,3 +662,23 @@ Answer cells for the new types (one row per cell, as in §2.6):
 | consent | `value_number` = 1, `value_text` = hash of the statement agreed to |
 
 Aggregation buckets now keep `sub_key`, so matrix rows and ranked options get their own counts.
+
+## 2.13 Phase 2B additions (migration `0003_phase2b.sql`)
+
+| Table | Purpose |
+|---|---|
+| `contacts` | Per org, unique by email (`citext`). Names, `attributes` (merge tags), and `unsubscribed_at`, `bounced_at`, `complained_at`, which no import clears. |
+| `contact_lists`, `contact_list_members` | Lists (unique name per org) and membership. |
+| `contact_imports` | One CSV import: column mapping, status, counts, the first 100 errors, and the key of the full error report. The uploaded file is deleted after the import. |
+| `email_suppressions` | Global, not per org: addresses SES reported as hard-bounced or complaining. Written only through `record_email_suppression()`. |
+| `campaigns` | Survey, list, its own `email` distribution link, subject and body (merge tags), status (`draft`, `scheduled`, `sending`, `sent`, `cancelled`), schedule and time zone, reminder policy. |
+| `recipients` | The list snapshot when sending starts: `token_hash` (SHA-256 of the personal link token, which is derived, never stored), status, send and reminder times. `responded_at` has hour precision for anonymous surveys. |
+| `responses.recipient_id` | Existing column, now used (non-anonymous only; the 0001 trigger still refuses it for anonymous surveys). A unique index allows one response per recipient. |
+| `tags`, `response_tags`, `response_notes` | Tags are per survey (case-insensitive names); notes have an author. |
+| `exports` | Asynchronous exports: format, options (scope and filter), status, stored file, row count, `expires_at` (7 days). |
+| `scheduled_reports` | Daily / weekly / monthly at an hour in a time zone, format, options, recipient user ids, `next_run_at`. |
+
+`answers_fulltext` is a GIN index on `to_tsvector('simple', value_text || other_text)` for response search. New
+narrow `SECURITY DEFINER` functions: `resolve_recipient` (personal link → org, survey, recipient),
+`record_email_suppression`, `due_scheduled_reports`, `campaigns_needing_reminders` and `expired_exports` (the
+worker's cross-org scans, which then switch into each org's tenant context).
