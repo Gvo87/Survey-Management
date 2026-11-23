@@ -1,6 +1,8 @@
 import type { Question } from './schema';
 import { otherText, selectedOptionKeys, type AnswerValue } from './answers';
 
+const labelOf = (options: { key: string; label: string }[], key: string) => options.find((o) => o.key === key)?.label ?? key;
+
 /** Human-readable form of an answer (response viewer, CSV "compact" layout, webhooks). */
 export function displayAnswer(question: Question, value: AnswerValue | null | undefined): string {
   if (value === null || value === undefined) return '';
@@ -17,6 +19,25 @@ export function displayAnswer(question: Question, value: AnswerValue | null | un
       });
       return labels.join('; ');
     }
+    case 'matrix': {
+      if (typeof value !== 'object' || Array.isArray(value)) return '';
+      return question.rows
+        .filter((row) => (value as Record<string, string | string[]>)[row.key] !== undefined)
+        .map((row) => {
+          const cell = (value as Record<string, string | string[]>)[row.key]!;
+          const columns = (Array.isArray(cell) ? cell : [cell]).map((c) => labelOf(question.options, c)).join(', ');
+          return `${row.label}: ${columns}`;
+        })
+        .join('; ');
+    }
+    case 'ranking':
+      return Array.isArray(value) ? value.map((key, i) => `${i + 1}. ${labelOf(question.options, key)}`).join('; ') : '';
+    case 'consent':
+      return value === true ? 'Agreed' : '';
+    case 'file_upload':
+      return Array.isArray(value) ? `${value.length} file${value.length === 1 ? '' : 's'}` : '';
+    case 'slider':
+      return question.config.unit ? `${value} ${question.config.unit}` : String(value);
     default:
       return String(value);
   }

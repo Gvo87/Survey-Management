@@ -21,13 +21,13 @@ describe('navigation', () => {
 
   it('walks pages in order and ends after the last page', () => {
     expect(firstPageKey(def)).toBe('p_page0001');
-    expect(nextPageKey(def, 'p_page0001', {})).toBe('p_page0002');
-    expect(nextPageKey(def, 'p_page0002', {})).toBeNull();
-    expect(isLastPage(def, 'p_page0002', {})).toBe(true);
+    expect(nextPageKey(def, 'p_page0001', { answers: {} })).toBe('p_page0002');
+    expect(nextPageKey(def, 'p_page0002', { answers: {} })).toBeNull();
+    expect(isLastPage(def, 'p_page0002', { answers: {} })).toBe(true);
   });
 
   it('restarts at the first page for an unknown page key', () => {
-    expect(nextPageKey(def, 'p_gone0001', {})).toBe('p_page0001');
+    expect(nextPageKey(def, 'p_gone0001', { answers: {} })).toBe('p_page0001');
   });
 
   it('reports progress', () => {
@@ -43,7 +43,7 @@ describe('navigation', () => {
         let key: string | null = firstPageKey(d);
         let steps = 0;
         while (key !== null && steps <= pages) {
-          key = nextPageKey(d, key, {});
+          key = nextPageKey(d, key, { answers: {} });
           steps++;
         }
         return key === null && steps === pages;
@@ -121,7 +121,7 @@ describe('checkCompletion', () => {
     fc.assert(
       fc.property(optionalTypes, (type) => {
         const d = createDefinition();
-        d.pages[0]!.elements.push(createQuestion(type, 'Q'));
+        d.pages[0]!.elements.push({ ...createQuestion(type, 'Q'), required: false });
         return checkCompletion(d, {}).ok;
       }),
     );

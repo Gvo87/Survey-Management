@@ -38,6 +38,8 @@ jobs:
         run: |
           PGPASSWORD=survey psql -h localhost -U survey -d survey -f docker/postgres/init.sql
       - run: pnpm db:migrate
+      - name: Start S3-compatible storage (uploads in the end-to-end tests)
+        run: docker run -d --name s3 -p 8333:8333 chrislusf/seaweedfs server -s3 -dir=/data -volume.max=8
       - run: pnpm verify
       - name: Production builds
         run: pnpm build

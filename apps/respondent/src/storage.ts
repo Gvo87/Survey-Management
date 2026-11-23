@@ -14,6 +14,8 @@ export interface LocalState {
   answers: Record<string, AnswerValue>;
   pageKey: string;
   history: string[];
+  /** Names and sizes of uploaded files, to list them again after a reload. */
+  files?: Record<string, { name: string; size: number }>;
   start: {
     distributionToken?: string;
     testToken?: string;

@@ -192,7 +192,7 @@ retries and out-of-order deliveries are safe.
 | GET | `/r/v1/s/{publicId}/response` | P1 | → `{ versionId, status, currentPageKey, seq, answers }` (resume) |
 | POST | `/r/v1/s/{publicId}/response/complete` | P1 | `SaveRequest` → `200 CompleteResult` · `422` |
 | POST | `/r/v1/s/{publicId}/unlock` | P2 | `{ password }` → `{ accessToken }` (short-lived, sent as `X-Access-Token`) |
-| POST | `/r/v1/s/{publicId}/uploads` | P2 | `{ questionKey, filename, mime, size }` → `{ fileId, uploadUrl, fields }` (S3 presigned POST, size and type enforced) |
+| POST | `/r/v1/s/{publicId}/uploads?questionKey=` | P2A | `multipart/form-data` with one file → `{ fileId, filename, size, mime }`. Built differently from the design: see §3.10 |
 | POST | `/r/v1/s/{publicId}/response/resume-link` | P2 | `{ email }` → `202` (not available in anonymous mode) |
 | GET/POST | `/r/v1/unsubscribe/{token}` | P2 | confirmation page / unsubscribe |
 
@@ -398,3 +398,36 @@ The contracts in `packages/contracts/src/index.ts` are authoritative. Difference
   sit in the job table. As a result, `POST /org/invitations` doesn't return the invitation link: it arrives by email.
 - **Not built in Phase 1:** the OpenAPI document (`/api/docs`). It's generated from the same Zod contracts when the
   public API arrives in Phase 3.
+
+## 3.10 Phase 2A additions (as built)
+
+**Respondent API**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/r/v1/s/{publicId}` | Adds `access.state` values `not_yet_open` (with `opensAt`) and `password_required` (no definition is returned), `theme`, `captchaSiteKey` and `presetHiddenFields` (link presets, so the browser evaluates logic on the same hidden fields as the server). `resume` includes the stored `hiddenFields`. |
+| POST | `/r/v1/s/{publicId}/unlock` | `{ password }` → `{ accessToken }`, sent back as `X-Access-Token`. Stateless HMAC token, 12 h, invalid as soon as the password changes. 10 attempts per 5 minutes per IP. |
+| PUT/POST | `…/response`, `…/response/complete` | The first save of a new response needs `start.captchaToken` when the survey has CAPTCHA on, and a valid access token when it has a password. Completion replays the logic: answers on skipped pages or hidden questions are discarded; the outcome is `completed` or `disqualified`; the end screen is piped and may carry a `redirectUrl`. |
+| POST / DELETE | `/r/v1/s/{publicId}/uploads`, `…/uploads/{fileId}` | Upload through the API (multipart), remove an upload. The response must exist; anonymous surveys refuse uploads (also enforced by a database trigger). |
+| GET | `/r/v1/assets/{fileId}` | Theme logos, only once scanned clean. |
+
+**Admin API**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET / POST / PUT / DELETE | `/api/v1/themes`, `/api/v1/themes/{id}` | `org.update`. `422 contrast_too_low` when colours fail WCAG AA. One default per org. |
+| POST | `/api/v1/themes/logo` | PNG, JPEG, WebP or GIF up to 1 MB (SVG refused: it can carry scripts). |
+| GET | `/api/v1/templates`, `/api/v1/templates/{kind}/{id}` | Global templates and this org's template surveys. |
+| POST | `/api/v1/surveys` | `fromTemplate: { kind, id }` copies a template with fresh keys (references in logic and piping are remapped). |
+| POST | `/api/v1/surveys/{id}/save-as-template` | Copies the latest draft (or live version) into a template survey. Templates are hidden from the survey list and can't be published (`409 template_not_publishable`). |
+| POST / DELETE | `/api/v1/admin/templates` | Super admins manage global templates. |
+| GET / POST / DELETE | `/api/v1/question-bank` | Questions are stored with fresh keys and without display logic. Only the author or an admin removes one. |
+| PATCH | `/api/v1/surveys/{id}` | `access.password` (write-only: string sets, `null` removes; reads show `passwordEnabled`), `access.opensAt`, `access.captcha`, `themeId`. |
+| GET | `/api/v1/files/{id}` | Downloads an upload (`responses.view`). `409 scan_pending`, `403 file_quarantined`, `409 scan_failed`. Every download is audited. Served with `Content-Disposition: attachment` and a sandbox CSP. |
+| GET | `…/responses?flag=`, `…/results/summary?excludeFlagged=`, `…/export.csv?excludeFlagged=` | Quality flags: `too_fast`, `straight_lined`, `malware`. |
+
+**Deviation: uploads go through the API, not to S3 with presigned URLs.** The design had the browser upload
+straight to S3. As built, the API receives the file, checks its real type from the first bytes (`file-type`; a
+renamed `.exe` is refused) and its size, then stores it and enqueues the scan. Trade-off: upload bandwidth passes
+through the API (limited to 25 MB per file, 30 uploads per response per hour), in exchange for one simple path where
+nothing unchecked ever lands in the bucket. Revisit if uploads get large or frequent.

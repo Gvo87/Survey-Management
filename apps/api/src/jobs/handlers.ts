@@ -2,6 +2,7 @@ import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import {
   aggregateResponse,
   authTokens,
+  files,
   invitations,
   newToken,
   organizations,
@@ -141,6 +142,41 @@ export function createJobHandlers(deps: Deps): JobHandlers {
             ),
           );
       });
+    },
+
+    /**
+     * Scan an upload. The file stays undownloadable until this marks it clean. Infected files move
+     * to the quarantine prefix, are flagged on their response and audited.
+     */
+    'files.scan': async ({ orgId, fileId }) => {
+      const [file] = await withTenant(pool, orgId, (tx) => tx.db.select().from(files).where(eq(files.id, fileId)));
+      if (!file || file.scanStatus !== 'pending') return;
+      const result = await deps.scanner.scan(await deps.storage.get(file.storageKey));
+      if (!result.infected) {
+        await withTenant(pool, orgId, (tx) =>
+          tx.db.update(files).set({ scanStatus: 'clean', scanDetail: result.detail, scannedAt: new Date() }).where(eq(files.id, fileId)),
+        );
+        return;
+      }
+      const quarantineKey = file.storageKey.replace(/^[a-z]+\//, 'quarantine/');
+      await deps.storage.copy(file.storageKey, quarantineKey);
+      await deps.storage.delete(file.storageKey);
+      await withTenant(pool, orgId, async (tx) => {
+        await tx.db
+          .update(files)
+          .set({ scanStatus: 'infected', scanDetail: result.detail, scannedAt: new Date(), storageKey: quarantineKey })
+          .where(eq(files.id, fileId));
+        if (file.responseId)
+          await tx.client.query(
+            `update responses set quality_flags = array(select distinct unnest(quality_flags || '{malware}'::text[])) where id = $1`,
+            [file.responseId],
+          );
+        await audit(tx, { orgId, actorId: null, action: 'file.quarantined', entityType: 'file', entityId: fileId, metadata: { signature: result.detail } });
+      });
+    },
+
+    'files.delete-objects': async ({ keys }) => {
+      for (const key of keys) await deps.storage.delete(key);
     },
   };
 }

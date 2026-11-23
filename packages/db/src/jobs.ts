@@ -6,6 +6,8 @@ export const QUEUES = {
   nightlyAggregates: 'aggregates.nightly',
   closeExpiredSurveys: 'surveys.close-expired',
   cleanupSessions: 'sessions.cleanup',
+  scanFile: 'files.scan',
+  deleteObjects: 'files.delete-objects',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

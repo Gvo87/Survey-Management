@@ -36,6 +36,9 @@ export async function createTestContext(
     emailTransport: 'memory',
     cookieSecure: false,
     signupMode: 'open',
+    storage: 'memory',
+    scanner: 'fake',
+    captcha: 'fake',
   });
   const deps = await createDeps(config, { worker: false });
   const app = await buildApp(deps, { logger: opts.logger ?? false });
@@ -150,6 +153,18 @@ export class Client {
     return this.request<T>('DELETE', url);
   }
 
+  /** Upload one file as multipart/form-data, with the session cookie and CSRF token. */
+  async upload<T = any>(url: string, filename: string, content: Buffer | string): Promise<Res<T>> {
+    const form = multipartBody(filename, content);
+    const res = await this.app.inject({
+      method: 'POST',
+      url,
+      payload: form.payload,
+      headers: { ...form.headers, ...(this.cookie ? { cookie: this.cookie } : {}), ...(this.csrf ? { 'x-csrf-token': this.csrf } : {}) },
+    });
+    return { status: res.statusCode, body: res.json() as T, headers: res.headers as Res['headers'], raw: res.body };
+  }
+
   get orgId(): string {
     return this.me!.activeOrg!.id;
   }
@@ -256,11 +271,12 @@ export class Respondent {
   constructor(
     readonly app: FastifyInstance,
     readonly publicId: string,
-    readonly opts: { ip?: string; userAgent?: string; query?: string } = {},
+    readonly opts: { ip?: string; userAgent?: string; query?: string; headers?: Record<string, string> } = {},
   ) {}
 
   private headers() {
     return {
+      ...this.opts.headers,
       'x-response-key': this.key,
       ...(this.opts.ip ? { 'x-forwarded-for': this.opts.ip } : {}),
       'user-agent': this.opts.userAgent ?? 'Mozilla/5.0 (Windows NT 10.0) Chrome/140',
@@ -303,4 +319,37 @@ export class Respondent {
   complete(answers: Record<string, unknown>, extra: Record<string, unknown> = {}) {
     return this.save(answers, extra, 'response/complete');
   }
+
+  async upload(questionKey: string, filename: string, content: Buffer | string) {
+    const form = multipartBody(filename, content);
+    const res = await this.app.inject({
+      method: 'POST',
+      url: `/r/v1/s/${this.publicId}/uploads?questionKey=${questionKey}`,
+      payload: form.payload,
+      headers: { ...this.headers(), ...form.headers },
+    });
+    return { status: res.statusCode, body: res.json() };
+  }
+
+  async removeUpload(fileId: string) {
+    const res = await this.app.inject({ method: 'DELETE', url: `/r/v1/s/${this.publicId}/uploads/${fileId}`, headers: this.headers() });
+    return { status: res.statusCode };
+  }
 }
+
+/** A multipart/form-data body with one file field, as a browser would send it. */
+export function multipartBody(filename: string, content: Buffer | string, type = 'application/octet-stream') {
+  const boundary = `----survey-test-${randomBytes(8).toString('hex')}`;
+  const payload = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n`),
+    Buffer.isBuffer(content) ? content : Buffer.from(content),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  return { payload, headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } };
+}
+
+/** A 1×1 PNG. */
+export const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+);

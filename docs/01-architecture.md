@@ -25,7 +25,7 @@ rewriting them.
 | Data access | Drizzle ORM, raw SQL for analytics | Thin, typed and SQL-shaped. Easy to run every request inside a tenant-scoped transaction. | Prisma: heavier, and RLS needs a per-query transaction workaround. |
 | Background jobs | **pg-boss** (job queue stored in Postgres) | Jobs are enqueued **in the same transaction** as the data that triggers them, so a committed response can't lose its webhooks or aggregation. | BullMQ on Redis: needs an outbox table to get the same guarantee. |
 | Cache, rate limits, pub/sub | Redis 7 | Rate limiting, published-definition cache, live dashboard fan-out (Phase 2). | — |
-| Object storage | S3 (MinIO locally), from Phase 2 | File uploads, exports, logos. | — |
+| Object storage | S3 (SeaweedFS locally), from Phase 2A | File uploads and logos (exports later). Uploads pass through the API (see 03 §3.10). | — |
 | Email | Amazon SES (Mailpit locally), behind an `EmailSender` interface | Low cost, bounce/complaint feeds. | Postmark/SendGrid: nicer DX, higher cost. Easy swap. |
 | Auth | Own email + password auth, server-side sessions, argon2id. SSO in Phase 3. | Small surface area, full control over the multi-org model. | Auth0/Clerk: per-user cost, and their tenancy model leaks into ours. |
 | Testing | Vitest, a dedicated Postgres test database (from docker compose), Playwright, axe-core, Lighthouse, a Node perf script | Real database in integration tests catches RLS and SQL mistakes that mocks hide. | Jest. Cypress. Testcontainers (slower on Windows, no gain over the compose database). k6 (an extra binary; the Node script measures the same thing). |
@@ -52,7 +52,7 @@ flowchart LR
 
   PG[("PostgreSQL<br/>data, RLS, job queue")]
   RD[("Redis<br/>rate limits, cache, pub/sub")]
-  S3[("Object storage<br/>S3 / MinIO")]
+  S3[("Object storage<br/>S3 / SeaweedFS")]
   MAIL["Email provider<br/>SES / Mailpit"]
   LLM["LLM provider<br/>(Phase 3, opt-in)"]
   HOOKS["Customer webhook<br/>endpoints"]
@@ -279,7 +279,7 @@ survey-management/
 │  ├─ contracts/        Zod request/response schemas shared by api, web, respondent
 │  └─ db/               Drizzle schema, SQL migrations (incl. RLS policies), seed scripts
 ├─ e2e/                 Playwright tests
-├─ docker-compose.yml   Postgres, Redis, Mailpit (MinIO added in Phase 2)
+├─ docker-compose.yml   Postgres, Redis, Mailpit, SeaweedFS (S3), ClamAV (profile `scan`)
 └─ docs/
 ```
 

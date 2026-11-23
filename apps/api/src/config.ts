@@ -1,4 +1,5 @@
 import { loadRootEnv } from '@survey/db';
+import type { S3Settings } from './infra/storage';
 
 export interface Config {
   env: 'development' | 'test' | 'production';
@@ -17,6 +18,12 @@ export interface Config {
   emailFrom: string;
   emailTransport: 'smtp' | 'memory';
   sentryDsn: string | null;
+  storage: 's3' | 'memory';
+  s3: S3Settings & { createBucket: boolean };
+  scanner: 'clamav' | 'disabled' | 'fake';
+  clamav: { host: string; port: number };
+  captcha: 'turnstile' | 'fake';
+  turnstile: { siteKey: string | null; secretKey: string | null };
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -28,6 +35,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       throw new Error(`Missing environment variable ${name} (see .env.example)`);
     return value;
   };
+  const opt = (name: string) => process.env[name] || null;
 
   const config: Config = {
     env,
@@ -44,12 +52,28 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     smtpUrl: get('SMTP_URL', 'smtp://localhost:1025'),
     emailFrom: get('EMAIL_FROM', 'Survey Platform <no-reply@survey.local>'),
     emailTransport: 'smtp',
-    sentryDsn: process.env.SENTRY_DSN || null,
+    sentryDsn: opt('SENTRY_DSN'),
+    storage: 's3',
+    s3: {
+      endpoint: opt('S3_ENDPOINT'),
+      region: get('S3_REGION', 'us-east-1'),
+      bucket: get('S3_BUCKET', 'survey-files'),
+      accessKey: get('S3_ACCESS_KEY', 'survey'),
+      secretKey: get('S3_SECRET_KEY', 'survey-dev-secret'),
+      forcePathStyle: get('S3_FORCE_PATH_STYLE', 'false') === 'true',
+      createBucket: get('S3_CREATE_BUCKET', 'false') === 'true',
+    },
+    scanner: get('MALWARE_SCANNER', env === 'production' ? 'clamav' : 'disabled') === 'clamav' ? 'clamav' : 'disabled',
+    clamav: { host: get('CLAMAV_HOST', 'localhost'), port: Number(get('CLAMAV_PORT', '3310')) },
+    captcha: 'turnstile',
+    turnstile: { siteKey: opt('TURNSTILE_SITE_KEY'), secretKey: opt('TURNSTILE_SECRET_KEY') },
     ...overrides,
   };
 
   if (config.sessionSecret.length < 32) throw new Error('SESSION_SECRET must be at least 32 characters');
-  if (config.env === 'production' && !config.cookieSecure)
-    throw new Error('COOKIE_SECURE must be true in production');
+  if (config.env === 'production') {
+    if (!config.cookieSecure) throw new Error('COOKIE_SECURE must be true in production');
+    if (config.scanner !== 'clamav') throw new Error('MALWARE_SCANNER must be clamav in production: uploads must be scanned');
+  }
   return config;
 }

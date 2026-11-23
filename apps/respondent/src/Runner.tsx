@@ -1,20 +1,30 @@
 /**
- * Renders a survey page by page: validation, navigation, progress and focus management.
+ * Renders a survey page by page: logic, piping, validation, navigation, progress and focus.
  * Used by the live survey and by the builder's preview, so both behave identically.
+ *
+ * Logic (Phase 2A) comes from @survey/core, the same code the server runs on completion:
+ * - conditions are evaluated on the answers along the respondent's path (`pathAnswers`), so an
+ *   answer on a page they skipped never shows or hides anything;
+ * - "Next" follows the page rules (`nextStep`); a rule that ends or disqualifies turns the button
+ *   into "Submit", and the server decides the outcome.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   firstPageKey,
   listQuestions,
-  nextPageKey,
+  nextStep,
+  pathAnswers,
+  pipe,
   progress,
+  QUESTION_TYPE_META,
   validatePage,
   visibleElements,
   type AnswerValue,
   type FieldError,
+  type Question,
   type SurveyDefinition,
 } from '@survey/core';
-import { QuestionView } from './questions';
+import { preloadExtraQuestions, QuestionView } from './questions';
 import { Paragraphs } from './Pages';
 
 export type CompleteOutcome = { ok: true } | { ok: false; errors: FieldError[] };
@@ -24,11 +34,16 @@ export interface RunnerProps {
   title: string;
   seed: string;
   anonymous?: boolean;
+  /** Hidden fields (URL parameters): conditions and piping can use them. */
+  hidden?: Record<string, string>;
+  logoUrl?: string | null;
   initialAnswers?: Record<string, AnswerValue>;
   initialPageKey?: string;
   initialHistory?: string[];
   banner?: ReactNode;
   status?: ReactNode;
+  /** Shown above the navigation buttons (the CAPTCHA, while a response hasn't started). */
+  beforeNav?: ReactNode;
   busy?: boolean;
   /** Jump to a page (builder preview). */
   goto?: { pageKey: string; nonce: number };
@@ -38,9 +53,9 @@ export interface RunnerProps {
 }
 
 export function Runner(props: RunnerProps) {
-  const { definition } = props;
+  const { definition, hidden } = props;
   const [answers, setAnswers] = useState<Record<string, AnswerValue>>(props.initialAnswers ?? {});
-  const [pageKey, setPageKey] = useState(props.initialPageKey ?? firstPageKey(definition));
+  const [pageKey, setPageKey] = useState(props.initialPageKey ?? firstPageKey(definition, { answers: {}, hidden }));
   const [history, setHistory] = useState<string[]>(props.initialHistory ?? []);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [announcement, setAnnouncement] = useState('');
@@ -61,27 +76,34 @@ export function Runner(props: RunnerProps) {
     }
   }, [props.goto?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Start fetching the widgets for Phase 2A question types as soon as the survey uses one.
+  useEffect(() => {
+    if (listQuestions(definition).some((q) => QUESTION_TYPE_META[q.type].phase !== 1)) preloadExtraQuestions();
+  }, [definition]);
+
   useLayoutEffect(() => {
     if (focusTarget.current === 'heading') {
       headingRef.current?.focus();
       window.scrollTo({ top: 0 });
     } else if (focusTarget.current === 'error') {
       const first = Object.keys(errors)[0];
-      const el = first
-        ? (document.getElementById(`q-${first}`) ?? document.getElementById(`q-${first}-input`))
-        : null;
-      const input = el?.matches('input, select, textarea')
-        ? el
-        : el?.querySelector<HTMLElement>('input, select, textarea');
+      const el = first ? (document.getElementById(`q-${first}`) ?? document.getElementById(`q-${first}-input`)) : null;
+      const input = el?.matches('input, select, textarea') ? el : el?.querySelector<HTMLElement>('input, select, textarea, button');
       (input ?? el)?.focus();
       el?.scrollIntoView({ block: 'center' });
     }
     focusTarget.current = null;
   });
 
+  // Logic sees only the answers on the respondent's path to this page, plus this page's.
+  const ctx = useMemo(
+    () => ({ answers: pathAnswers(definition, answers, page.key, hidden), hidden }),
+    [definition, answers, page.key, hidden],
+  );
+  const piped = (text: string) => pipe(text, { def: definition, answers: ctx.answers, hidden });
   const { index, total, percent } = progress(definition, page.key);
-  const next = nextPageKey(definition, page.key, answers);
-  const isLast = next === null;
+  const step = nextStep(definition, page.key, ctx);
+  const isLast = step.kind !== 'page';
   const questionNumbers = new Map(listQuestions(definition).map((q, i) => [q.key, i + 1]));
 
   const setAnswer = (key: string, value: AnswerValue | null) => {
@@ -96,9 +118,7 @@ export function Runner(props: RunnerProps) {
   const showErrors = (list: FieldError[]) => {
     const map = Object.fromEntries(list.map((e) => [e.questionKey, e.message]));
     setErrors(map);
-    setAnnouncement(
-      `${list.length} ${list.length === 1 ? 'question needs' : 'questions need'} your attention.`,
-    );
+    setAnnouncement(`${list.length} ${list.length === 1 ? 'question needs' : 'questions need'} your attention.`);
     focusTarget.current = 'error';
   };
 
@@ -115,11 +135,11 @@ export function Runner(props: RunnerProps) {
   const onNext = async (event: React.FormEvent) => {
     event.preventDefault();
     if (submitting || props.busy) return;
-    const pageErrors = validatePage(definition, page.key, answers);
+    const pageErrors = validatePage(definition, page.key, answers, hidden);
     if (pageErrors.length) return showErrors(pageErrors);
-    if (!isLast) {
-      props.onPageComplete?.(answers, next!);
-      goTo(next!, [...history, page.key]);
+    if (step.kind === 'page') {
+      props.onPageComplete?.(answers, step.pageKey);
+      goTo(step.pageKey, [...history, page.key]);
       return;
     }
     setSubmitting(true);
@@ -127,8 +147,7 @@ export function Runner(props: RunnerProps) {
       const outcome = await props.onSubmit(answers);
       if (!outcome.ok) {
         const firstPage = outcome.errors[0]?.pageKey;
-        if (firstPage && firstPage !== page.key && definition.pages.some((p) => p.key === firstPage))
-          setPageKey(firstPage);
+        if (firstPage && firstPage !== page.key && definition.pages.some((p) => p.key === firstPage)) setPageKey(firstPage);
         showErrors(outcome.errors);
       }
     } finally {
@@ -142,16 +161,19 @@ export function Runner(props: RunnerProps) {
   };
 
   const errorList = Object.entries(errors);
-  const pageTitle = page.title?.trim() || (total > 1 ? `Page ${index + 1} of ${total}` : '');
+  const pageTitle = page.title?.trim() ? piped(page.title) : total > 1 ? `Page ${index + 1} of ${total}` : '';
+  const pipedQuestion = (q: Question): Question =>
+    q.title.includes('{{') || q.helpText?.includes('{{')
+      ? { ...q, title: piped(q.title), ...(q.helpText ? { helpText: piped(q.helpText) } : {}) }
+      : q;
 
   return (
     <main className="survey">
       {props.banner}
       <header className="survey-header">
+        {props.logoUrl ? <img className="survey-logo" src={props.logoUrl} alt="" /> : null}
         <h1 className="survey-title">{props.title}</h1>
-        {props.anonymous ? (
-          <p className="anonymous-note">This survey is anonymous. Your answers aren't linked to you.</p>
-        ) : null}
+        {props.anonymous ? <p className="anonymous-note">This survey is anonymous. Your answers aren't linked to you.</p> : null}
         {definition.settings.showProgressBar && total > 1 ? (
           <div className="progress">
             <div
@@ -176,14 +198,12 @@ export function Runner(props: RunnerProps) {
         <h2 className={pageTitle ? 'page-title' : 'sr-only'} ref={headingRef} tabIndex={-1}>
           {pageTitle || props.title}
         </h2>
-        {page.description ? <Paragraphs text={page.description} className="page-description" /> : null}
+        {page.description ? <Paragraphs text={piped(page.description)} className="page-description" /> : null}
 
         {errorList.length > 0 ? (
           <div className="error-summary" role="alert">
             <p>
-              <strong>
-                Please check {errorList.length === 1 ? 'this answer' : `these ${errorList.length} answers`}:
-              </strong>
+              <strong>Please check {errorList.length === 1 ? 'this answer' : `these ${errorList.length} answers`}:</strong>
             </p>
             <ul>
               {errorList.map(([key, message]) => (
@@ -197,13 +217,13 @@ export function Runner(props: RunnerProps) {
           </div>
         ) : null}
 
-        {visibleElements(page, answers).map((element) =>
+        {visibleElements(definition, page, ctx).map((element) =>
           element.kind === 'text' ? (
-            <Paragraphs key={element.key} text={element.body} className="text-block" />
+            <Paragraphs key={element.key} text={piped(element.body)} className="text-block" />
           ) : (
             <QuestionView
               key={element.key}
-              question={element}
+              question={pipedQuestion(element)}
               number={questionNumbers.get(element.key) ?? 0}
               value={answers[element.key]}
               error={errors[element.key]}
@@ -213,6 +233,7 @@ export function Runner(props: RunnerProps) {
           ),
         )}
 
+        {props.beforeNav}
         <div className="nav">
           {definition.settings.allowBack && history.length > 0 ? (
             <button type="button" className="button secondary" onClick={onBack} disabled={submitting}>

@@ -3,27 +3,34 @@
  * preview is exactly what respondents get (same renderer, same validation).
  */
 import { useEffect, useRef } from 'react';
-import type { SurveyDefinition } from '@survey/core';
+import type { SurveyDefinition, ThemeTokens } from '@survey/core';
 import { cx } from '../../../components/ui';
 
 export const RESPONDENT_URL =
   (import.meta.env.VITE_RESPONDENT_URL as string | undefined) ?? 'http://localhost:5174';
 const RESPONDENT_ORIGIN = new URL(RESPONDENT_URL).origin;
 
+export interface PreviewTheme {
+  tokens: ThemeTokens;
+  logoUrl: string | null;
+}
+
 export function PreviewFrame({
   definition,
   title,
   pageKey,
   device,
+  theme = null,
 }: {
   definition: SurveyDefinition;
   title: string;
   pageKey: string | null;
   device: 'desktop' | 'mobile';
+  theme?: PreviewTheme | null;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
-  const latest = useRef({ definition, title });
-  latest.current = { definition, title };
+  const latest = useRef({ definition, title, theme });
+  latest.current = { definition, title, theme };
   const ready = useRef(false);
 
   const send = (message: object) => frame.current?.contentWindow?.postMessage(message, RESPONDENT_ORIGIN);
@@ -43,9 +50,9 @@ export function PreviewFrame({
   // Debounced so typing doesn't re-render the preview on every keystroke (still well under 1 s).
   useEffect(() => {
     if (!ready.current) return;
-    const t = window.setTimeout(() => send({ type: 'preview:definition', definition, title }), 150);
+    const t = window.setTimeout(() => send({ type: 'preview:definition', definition, title, theme }), 150);
     return () => window.clearTimeout(t);
-  }, [definition, title]);
+  }, [definition, title, theme]);
 
   useEffect(() => {
     if (ready.current && pageKey) send({ type: 'preview:goto', pageKey });

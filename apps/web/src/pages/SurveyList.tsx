@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { useInfiniteQuery } from '@tanstack/react-query';
-import type { PageResult, SurveyDetail, SurveyStatus, SurveySummary } from '@survey/contracts';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import type { PageResult, SurveyDetail, SurveyStatus, SurveySummary, TemplateSummary } from '@survey/contracts';
 import { errorMessage, get, post } from '../api';
 import { useOrgRole } from '../auth';
 import {
@@ -181,24 +181,60 @@ function NewSurveyDialog({
   onCreated: (s: SurveyDetail) => void;
 }) {
   const [title, setTitle] = useState('');
+  const [template, setTemplate] = useState<TemplateSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const templates = useQuery({ queryKey: ['templates'], queryFn: () => get<TemplateSummary[]>('/templates'), enabled: open });
+  const groups = useMemo(() => {
+    const map = new Map<string, TemplateSummary[]>();
+    for (const t of templates.data ?? []) map.set(t.category, [...(map.get(t.category) ?? []), t]);
+    return [...map.entries()];
+  }, [templates.data]);
+
   const create = async () => {
     if (!title.trim()) return setError('Give your survey a title.');
     setBusy(true);
     try {
-      onCreated(await post<SurveyDetail>('/surveys', { title }));
+      onCreated(
+        await post<SurveyDetail>('/surveys', {
+          title,
+          ...(template ? { fromTemplate: { kind: template.kind, id: template.id } } : {}),
+        }),
+      );
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
   };
+  const choose = (t: TemplateSummary | null) => {
+    setTemplate(t);
+    if (t && (!title.trim() || title === template?.name)) setTitle(t.name);
+  };
+  const option = (t: TemplateSummary | null) => {
+    const checked = template?.id === t?.id;
+    return (
+      <label
+        key={t ? `${t.kind}:${t.id}` : 'blank'}
+        className={`flex cursor-pointer flex-col gap-1 rounded-lg border p-3 text-sm ${checked ? 'border-brand-500 bg-brand-50' : 'border-line bg-white hover:border-brand-500'}`}
+      >
+        <span className="flex items-center gap-2">
+          <input type="radio" name="template" className="accent-brand-600" checked={checked} onChange={() => choose(t)} />
+          <span className="font-medium">{t ? t.name : 'Blank survey'}</span>
+        </span>
+        <span className="text-xs text-muted">
+          {t ? `${t.description ? `${t.description} ` : ''}${t.questionCount} question${t.questionCount === 1 ? '' : 's'}.` : 'Start from an empty page.'}
+        </span>
+      </label>
+    );
+  };
+
   return (
     <Dialog
       open={open}
       onClose={onClose}
       title="New survey"
+      wide
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
@@ -209,6 +245,7 @@ function NewSurveyDialog({
       }
     >
       <form
+        className="flex flex-col gap-4"
         onSubmit={(e) => {
           e.preventDefault();
           void create();
@@ -222,6 +259,17 @@ function NewSurveyDialog({
           error={error ?? undefined}
           placeholder="e.g. Customer satisfaction, Q1"
         />
+        <fieldset className="flex flex-col gap-3">
+          <legend className="mb-1 text-sm font-medium">Start from</legend>
+          <div className="grid gap-2 sm:grid-cols-2">{option(null)}</div>
+          {templates.isLoading ? <p className="text-sm text-muted">Loading templates…</p> : null}
+          {groups.map(([category, list]) => (
+            <div key={category} className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">{category}</h3>
+              <div className="grid gap-2 sm:grid-cols-2">{list.map((t) => option(t))}</div>
+            </div>
+          ))}
+        </fieldset>
       </form>
     </Dialog>
   );

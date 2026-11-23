@@ -1,5 +1,5 @@
 /* Respondent styles. Mobile-first; colours meet WCAG AA contrast; 44px minimum touch targets.
-   Phase 2A themes will override the custom properties below. */
+   Themes (Phase 2A) override the custom properties below; see theme.ts. */
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
@@ -15,14 +15,17 @@
   --focus: #f2a900;
   --star: #c27c00;
   --radius: 10px;
-  font-family:
+  --link: var(--primary);
+  font-family: var(
+    --font,
     system-ui,
     -apple-system,
     'Segoe UI',
     Roboto,
     'Helvetica Neue',
     Arial,
-    sans-serif;
+    sans-serif
+  );
   font-size: 100%;
   line-height: 1.5;
   color: var(--text);
@@ -415,7 +418,7 @@ h1:focus {
 .link-button {
   background: none;
   border: 0;
-  color: var(--primary);
+  color: var(--link);
   font: inherit;
   font-weight: 600;
   text-decoration: underline;
@@ -453,4 +456,253 @@ h1:focus {
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ── Themes (Phase 2A) ─────────────────────────────────────────────────────
+   A theme guarantees text ≥ 4.5:1 on background and surface, and primary ≥ 3:1 on the surface.
+   Derived colours stay inside those guarantees: links and secondary text use the text colour. */
+:root[data-themed] {
+  --muted: var(--text);
+  --link: var(--text);
+  --border: color-mix(in srgb, var(--text) 55%, var(--surface));
+  --selected-bg: color-mix(in srgb, var(--primary) 12%, var(--surface));
+  --primary-hover: color-mix(in srgb, var(--primary) 85%, #000);
+}
+.survey-logo {
+  display: block;
+  max-height: 56px;
+  max-width: 220px;
+  margin-bottom: 16px;
+  object-fit: contain;
+}
+.question-loading {
+  min-height: 120px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--text) 8%, var(--surface));
+}
+.preview-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* ── Matrix: grid from 600px, one block per row below ─────────────────────── */
+.matrix {
+  display: grid;
+  gap: 12px;
+}
+.matrix-head {
+  display: none;
+}
+.matrix-row {
+  display: grid;
+  gap: 8px;
+}
+.matrix-row-label {
+  font-weight: 600;
+}
+.matrix-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+.matrix-cell:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--selected-bg);
+}
+.matrix-cell input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+@media (min-width: 600px) {
+  .matrix {
+    gap: 0;
+  }
+  .matrix-head,
+  .matrix-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 1.6fr) repeat(var(--cols), minmax(0, 1fr));
+    align-items: center;
+  }
+  .matrix-head span {
+    padding: 0 4px 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-align: center;
+    color: var(--muted);
+  }
+  .matrix-row {
+    gap: 0;
+    border-top: 1px solid var(--border);
+  }
+  .matrix-row:nth-child(even) {
+    background: color-mix(in srgb, var(--text) 4%, var(--surface));
+  }
+  .matrix-row-label {
+    padding: 10px 8px 10px 0;
+    font-weight: 500;
+  }
+  .matrix-cell,
+  .matrix-cell:has(input:checked) {
+    justify-content: center;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    padding: 0;
+    min-height: 48px;
+  }
+  /* The column header names each cell visually; screen readers still get the label text. */
+  .matrix-cell-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+}
+
+/* ── Ranking ──────────────────────────────────────────────────────────────── */
+.ranking {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.ranking-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px 6px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.ranking-item.ranked {
+  border-color: var(--primary);
+  background: var(--selected-bg);
+}
+.ranking-item label {
+  flex: 1;
+  cursor: pointer;
+}
+.rank-select {
+  width: 4.5rem;
+  flex-shrink: 0;
+}
+
+/* ── Slider ───────────────────────────────────────────────────────────────── */
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.slider input[type='range'] {
+  flex: 1;
+  min-height: 44px;
+  accent-color: var(--primary);
+}
+.slider.unset input[type='range'] {
+  opacity: 0.55;
+}
+.slider-value {
+  min-width: 6rem;
+  text-align: right;
+  font-weight: 600;
+}
+.slider.unset .slider-value {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ── File upload ─────────────────────────────────────────────────────────── */
+.file-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.file-name {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.file-size {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.file-input {
+  display: block;
+  max-width: 100%;
+  min-height: 44px;
+  font: inherit;
+}
+.file-input::file-selector-button {
+  min-height: 44px;
+  margin-right: 12px;
+  padding: 0 16px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.file-status {
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.file-status:empty {
+  display: none;
+}
+
+/* ── Consent ─────────────────────────────────────────────────────────────── */
+.consent-statement {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border-left: 4px solid var(--border);
+  background: color-mix(in srgb, var(--text) 4%, var(--surface));
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.consent-statement p {
+  margin: 0 0 8px;
+}
+.consent-statement p:last-child {
+  margin-bottom: 0;
+}
+.consent-statement a {
+  color: var(--link);
+}
+
+/* ── Access: password gate and CAPTCHA ─────────────────────────────────────── */
+.password-gate {
+  max-width: 360px;
+  margin: 0 auto;
+  text-align: left;
+}
+.password-gate .text-input {
+  margin-bottom: 12px;
+}
+.captcha {
+  margin: 8px 0 20px;
 }

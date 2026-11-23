@@ -109,6 +109,8 @@ export function convertQuestion(question: Question, type: QuestionType): Questio
       .map((o) => ({ key: o.key, label: o.label, ...(o.isOther ? { isOther: true } : {}) }));
   }
   if (next.helpText === undefined) delete (next as { helpText?: string }).helpText;
+  // Display logic belongs to the slot, not the type: keep it.
+  if (question.visibleIf) next.visibleIf = question.visibleIf;
   return next;
 }
 

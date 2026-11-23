@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import type { Problem } from '@survey/contracts';
 import type { Deps } from './deps';
@@ -11,6 +12,9 @@ import { registerDistributionRoutes } from './modules/distributions';
 import { registerOrgRoutes } from './modules/org';
 import { registerRespondentRoutes } from './modules/respondent';
 import { registerResultsRoutes } from './modules/results';
+import { registerFileRoutes } from './modules/files';
+import { registerTemplateRoutes } from './modules/templates';
+import { registerThemeRoutes } from './modules/themes';
 import { registerSurveyRoutes } from './modules/surveys';
 
 /** Log the path only: query strings and invitation tokens can carry secrets. */
@@ -64,6 +68,8 @@ export async function buildApp(
   // JSON only: cross-site HTML forms can't send application/json without a CORS preflight.
   app.removeContentTypeParser('text/plain');
   await app.register(cookie);
+  // Uploads: one file per request, size limits set per route (25 MB hard ceiling).
+  await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024, files: 1, fields: 5, parts: 6 } });
   registerAuth(app, deps);
 
   app.addHook('onSend', async (req, reply, payload) => {
@@ -142,6 +148,9 @@ export async function buildApp(
   registerDistributionRoutes(app, deps);
   registerRespondentRoutes(app, deps);
   registerResultsRoutes(app, deps);
+  registerThemeRoutes(app, deps);
+  registerTemplateRoutes(app, deps);
+  registerFileRoutes(app, deps);
 
   return app;
 }

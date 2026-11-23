@@ -19,7 +19,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
-import type { SurveyDefinition } from '@survey/core';
+import type { Question, SurveyDefinition, ThemeTokens } from '@survey/core';
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => 'bytea' });
 const citext = customType<{ data: string }>({ dataType: () => 'citext' });
@@ -32,6 +32,23 @@ export interface SurveyAccess {
   closesAt: string | null;
   quota: number | null;
   onePerBrowser: boolean;
+  /** Phase 2A. Absent on surveys created before it (read with `readAccess`). */
+  opensAt?: string | null;
+  captcha?: boolean;
+  /** argon2id hash; never returned by the API. */
+  passwordHash?: string | null;
+}
+
+/** Access settings with Phase 2A defaults filled in. */
+export function readAccess(a: SurveyAccess): Required<SurveyAccess> {
+  return {
+    closesAt: a.closesAt ?? null,
+    quota: a.quota ?? null,
+    onePerBrowser: a.onePerBrowser ?? false,
+    opensAt: a.opensAt ?? null,
+    captcha: a.captcha ?? false,
+    passwordHash: a.passwordHash ?? null,
+  };
 }
 
 export const organizations = pgTable('organizations', {
@@ -120,6 +137,9 @@ export const surveys = pgTable('surveys', {
   createdAt: ts('created_at').notNull().defaultNow(),
   updatedAt: ts('updated_at').notNull().defaultNow(),
   deletedAt: ts('deleted_at'),
+  themeId: uuid('theme_id'),
+  isTemplate: boolean('is_template').notNull().default(false),
+  templateDescription: text('template_description'),
 });
 
 export const surveyVersions = pgTable('survey_versions', {
@@ -243,7 +263,62 @@ export const auditLogs = pgTable('audit_logs', {
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
+export const themes = pgTable('themes', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  name: text('name').notNull(),
+  tokens: jsonb('tokens').$type<ThemeTokens>().notNull(),
+  logoFileId: uuid('logo_file_id'),
+  isDefault: boolean('is_default').notNull().default(false),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export const globalTemplates = pgTable('global_templates', {
+  id: uuid('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description').notNull().default(''),
+  category: text('category').notNull().default('general'),
+  definition: jsonb('definition').$type<SurveyDefinition>().notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export const questionBankItems = pgTable('question_bank_items', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  question: jsonb('question').$type<Question>().notNull(),
+  tags: text('tags').array().notNull().default(sql`'{}'`),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type ScanStatus = 'pending' | 'clean' | 'infected' | 'error';
+
+export const files = pgTable('files', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  purpose: text('purpose').$type<'response_upload' | 'logo'>().notNull(),
+  surveyId: uuid('survey_id'),
+  responseId: uuid('response_id'),
+  questionKey: text('question_key'),
+  storageKey: text('storage_key').notNull(),
+  filename: text('filename').notNull(),
+  mime: text('mime').notNull(),
+  size: integer('size').notNull(),
+  sha256: bytea('sha256').notNull(),
+  scanStatus: text('scan_status').$type<ScanStatus>().notNull().default('pending'),
+  scanDetail: text('scan_detail'),
+  scannedAt: ts('scanned_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
 export const tables = {
+  themes,
+  globalTemplates,
+  questionBankItems,
+  files,
   organizations,
   users,
   memberships,

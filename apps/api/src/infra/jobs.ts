@@ -13,6 +13,8 @@ export interface JobPayloads {
   'aggregates.nightly': Record<string, never>;
   'surveys.close-expired': Record<string, never>;
   'sessions.cleanup': Record<string, never>;
+  'files.scan': { orgId: string; fileId: string };
+  'files.delete-objects': { keys: string[] };
 }
 
 /**

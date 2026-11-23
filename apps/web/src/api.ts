@@ -68,5 +68,28 @@ export const put = <T>(path: string, body?: unknown, headers?: Record<string, st
   api<T>('PUT', path, body, headers);
 export const del = <T = void>(path: string) => api<T>('DELETE', path);
 
+/** Upload one file as multipart/form-data (same CSRF and organization headers as `api`). */
+export async function upload<T>(path: string, file: File): Promise<T> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  let res: Response;
+  try {
+    res = await fetch(`/api/v1${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        ...(activeOrgId ? { 'X-Org-Id': activeOrgId } : {}),
+      },
+      body: form,
+    });
+  } catch {
+    throw new ApiError(0, null);
+  }
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!res.ok) throw new ApiError(res.status, data as ApiError['problem']);
+  return data as T;
+}
+
 export const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : 'Something went wrong.';

@@ -237,7 +237,7 @@ describe('CSV export', () => {
     expect(lines).toHaveLength(N + 1); // header + completed responses only
     const header = lines[0]!;
     expect(header).toContain(
-      'response_id,status,started_at,completed_at,duration_sec,version,distribution,device_type,hidden:source',
+      'response_id,status,started_at,completed_at,duration_sec,version,distribution,device_type,quality_flags,hidden:source',
     );
     expect(header).toContain('Favourite colour,Favourite colour - Other');
     expect(res.raw).toContain('"日本語のテキスト, ""quoted"""');

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type { PageResult, QuestionSummary, ResultsSummary } from '@survey/contracts';
 import { QUESTION_TYPE_META } from '@survey/core';
@@ -35,6 +36,7 @@ export function useResultFilters() {
   const [versionId, setVersionId] = useState('');
   const [includePartial, setIncludePartial] = useState(false);
   const [includeTest, setIncludeTest] = useState(false);
+  const [excludeFlagged, setExcludeFlagged] = useState(false);
   const params = useMemo(() => {
     const p = new URLSearchParams();
     if (range === '7' || range === '30')
@@ -45,8 +47,9 @@ export function useResultFilters() {
     if (versionId) p.set('versionId', versionId);
     if (includePartial) p.set('includePartial', 'true');
     if (includeTest) p.set('includeTest', 'true');
+    if (excludeFlagged) p.set('excludeFlagged', 'true');
     return p;
-  }, [range, from, to, versionId, includePartial, includeTest]);
+  }, [range, from, to, versionId, includePartial, includeTest, excludeFlagged]);
   return {
     range,
     setRange,
@@ -60,6 +63,8 @@ export function useResultFilters() {
     setIncludePartial,
     includeTest,
     setIncludeTest,
+    excludeFlagged,
+    setExcludeFlagged,
     params,
   };
 }
@@ -118,6 +123,12 @@ export function ResultsPage() {
             checked={f.includeTest}
             onChange={(e) => f.setIncludeTest(e.target.checked)}
           />
+          <Checkbox
+            label="Leave out low-quality responses"
+            hint="Too fast, straight-lined, or with a file that contained malware."
+            checked={f.excludeFlagged}
+            onChange={(e) => f.setExcludeFlagged(e.target.checked)}
+          />
         </div>
         <div className="ml-auto flex items-center gap-3 pb-1">
           <span className="text-xs text-muted" aria-live="polite">
@@ -143,6 +154,11 @@ export function ResultsPage() {
             <StatTile label="Average time" value={formatDuration(data.totals.avgDurationSec)} />
             <StatTile label="Median time" value={formatDuration(data.totals.medianDurationSec)} />
           </div>
+          {data.totals.disqualified ? (
+            <p className="mt-2 text-sm text-muted">
+              {formatNumber(data.totals.disqualified)} screened out by logic rules (not counted as completed).
+            </p>
+          ) : null}
 
           {data.dropoff.length > 1 ? (
             <Card title="Where people stop" className="mt-6">
@@ -192,7 +208,8 @@ const CATEGORICAL = [
 function QuestionCard({ q, number, surveyId }: { q: QuestionSummary; number: number; surveyId: string }) {
   const [view, setView] = useState<'chart' | 'share' | 'table'>('chart');
   const canShare = (q.type === 'single_choice' || q.type === 'dropdown') && q.answered > 0;
-  const isText = q.type === 'short_text' || q.type === 'long_text' || q.type === 'email';
+  const isText =
+    q.type === 'short_text' || q.type === 'long_text' || q.type === 'email' || q.type === 'phone' || q.type === 'file_upload' || q.type === 'consent';
   return (
     <Card
       title={
@@ -400,9 +417,81 @@ function QuestionBody({
       ) : (
         <p className="text-sm text-muted">No answers yet.</p>
       );
+    case 'matrix':
+      return view === 'table' ? (
+        <DataTable
+          caption={q.title}
+          columns={['Row', ...q.columns.map((c) => c.label), 'Answered']}
+          rows={q.rows.map((r, i) => [r.label, ...q.counts[i]!, r.answered])}
+        />
+      ) : (
+        <MatrixHeat q={q} />
+      );
+    case 'ranking': {
+      const answered = q.answered || 1;
+      return view === 'table' ? (
+        <DataTable
+          caption={q.title}
+          columns={['Option', 'Average rank', 'Ranked first', 'Ranked']}
+          rows={q.options.map((o) => [o.label, o.meanRank ?? '-', o.firstPlace, o.ranked])}
+        />
+      ) : (
+        <div className="flex flex-col gap-2">
+          <BarList
+            ariaLabel={`${q.title}: options by average rank, bars show how often each was ranked first`}
+            rows={q.options.map((o, i) => ({
+              key: o.key,
+              label: `${i + 1}. ${o.label} (avg. rank ${o.meanRank ?? '-'})`,
+              count: o.firstPlace,
+              pct: Math.round((o.firstPlace / answered) * 1000) / 10,
+            }))}
+          />
+          <p className="text-xs text-muted">
+            Sorted by average rank (1 is best). Bars show how often each option was ranked first.
+          </p>
+        </div>
+      );
+    }
+    case 'slider':
+      return view === 'table' ? (
+        <DataTable
+          caption={q.title}
+          columns={['Range', 'Responses']}
+          rows={q.histogram.map((b) => [`${b.from} to ${b.to}`, b.count])}
+        />
+      ) : (
+        <div className="grid gap-4 md:grid-cols-[160px_1fr]">
+          <div>
+            <div className="text-3xl font-semibold">{q.mean ?? '-'}</div>
+            <div className="text-sm text-muted">
+              average ({q.min} to {q.max})
+            </div>
+            <div className="mt-2 text-sm text-muted">Median {q.median ?? '-'}</div>
+          </div>
+          <Columns ariaLabel={q.title} data={q.histogram.map((b) => ({ label: String(b.from), count: b.count }))} />
+        </div>
+      );
+    case 'consent':
+      return (
+        <p className="text-sm">
+          <strong className="text-2xl font-semibold">{formatNumber(q.agreed)}</strong> agreed
+          {q.answered ? ` (${formatPercent(q.agreed / q.answered)} of those who answered)` : ''}.
+        </p>
+      );
+    case 'file_upload':
+      return (
+        <p className="text-sm">
+          {formatNumber(q.files)} {q.files === 1 ? 'response includes' : 'responses include'} files. Open a response on the{' '}
+          <Link className="text-brand-600 underline" to="../responses" relative="path">
+            Responses
+          </Link>{' '}
+          tab to download them.
+        </p>
+      );
     case 'short_text':
     case 'long_text':
     case 'email':
+    case 'phone':
       return (
         <TextAnswers
           surveyId={surveyId}
@@ -412,6 +501,51 @@ function QuestionBody({
         />
       );
   }
+}
+
+/** Matrix as a table shaded by row share (one light-to-mid hue, so the text stays readable). */
+function MatrixHeat({ q }: { q: Extract<QuestionSummary, { type: 'matrix' }> }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-separate border-spacing-0.5 text-sm">
+        <caption className="sr-only">{q.title}: answers per row, with the share of each row</caption>
+        <thead>
+          <tr>
+            <th scope="col" className="sr-only">
+              Row
+            </th>
+            {q.columns.map((c) => (
+              <th key={c.key} scope="col" className="px-2 pb-1 text-center text-xs font-medium text-muted">
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {q.rows.map((r, i) => (
+            <tr key={r.key}>
+              <th scope="row" className="pr-3 text-left font-medium">
+                {r.label}
+              </th>
+              {q.columns.map((c, j) => {
+                const count = q.counts[i]![j]!;
+                const share = r.answered ? count / r.answered : 0;
+                return (
+                  <td
+                    key={c.key}
+                    className="rounded px-2 py-2 text-center tabular"
+                    style={{ background: `color-mix(in srgb, #2a78d6 ${Math.round(6 + share * 44)}%, white)` }}
+                  >
+                    {Math.round(share * 100)}%<span className="sr-only"> ({count})</span>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function TextAnswers({

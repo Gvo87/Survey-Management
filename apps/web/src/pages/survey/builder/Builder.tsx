@@ -17,10 +17,11 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import type { PublishResult, SurveyDetail, VersionDetail, VersionSummary } from '@survey/contracts';
+import type { BankItem, PublishResult, SurveyDetail, Theme, VersionDetail, VersionSummary } from '@survey/contracts';
 import {
   QUESTION_TYPES,
   QUESTION_TYPE_META,
+  bankQuestion,
   createQuestion,
   createTextBlock,
   type Element,
@@ -58,10 +59,18 @@ import {
   updatePage,
 } from './defs';
 import { ElementEditor, IssueList } from './ElementEditor';
-import { PreviewFrame } from './PreviewFrame';
+import { LogicMapDialog, PageRulesEditor, PipeMenu, readableTokens, sourcesBefore, usePipeTarget, VisibilityEditor } from './logic';
+import { PreviewFrame, type PreviewTheme } from './PreviewFrame';
 import { useDraft, type SaveState } from './useDraft';
 
 type DraftApi = ReturnType<typeof useDraft>;
+
+/** The theme respondents will see: the survey's own, or the organization's default. */
+function usePreviewTheme(survey: SurveyDetail): PreviewTheme | null {
+  const themes = useQuery({ queryKey: ['themes'], queryFn: () => get<Theme[]>('/themes'), staleTime: 60_000 });
+  const theme = themes.data?.find((t) => (survey.themeId ? t.id === survey.themeId : t.isDefault));
+  return theme ? { tokens: theme.tokens, logoUrl: theme.logoUrl } : null;
+}
 
 export function BuilderPage() {
   const { survey, canEdit, refresh } = useSurvey();
@@ -88,6 +97,7 @@ function LiveVersion({ survey, onEdit }: { survey: SurveyDetail; onEdit: () => v
     enabled: Boolean(current),
   });
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
+  const theme = usePreviewTheme(survey);
   return (
     <div className="flex flex-col gap-4">
       <Alert tone="success">
@@ -119,6 +129,7 @@ function LiveVersion({ survey, onEdit }: { survey: SurveyDetail; onEdit: () => v
               title={survey.title}
               pageKey={null}
               device={device}
+              theme={theme}
             />
           </div>
         </div>
@@ -181,7 +192,8 @@ function Editor({
   const [selected, setSelected] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(true);
   const [device, setDevice] = useState<'desktop' | 'mobile'>('mobile');
-  const [dialog, setDialog] = useState<null | 'settings' | 'publish' | 'problems' | 'discard'>(null);
+  const [dialog, setDialog] = useState<null | 'settings' | 'publish' | 'problems' | 'discard' | 'logic'>(null);
+  const theme = usePreviewTheme(survey);
   const [confirmDelete, setConfirmDelete] = useState<{ kind: 'element' | 'page'; key: string } | null>(null);
 
   const numbers = useMemo(() => questionNumbers(definition), [definition]);
@@ -249,6 +261,9 @@ function Editor({
                 : ''}
             </Button>
           ) : null}
+          <Button size="sm" onClick={() => setDialog('logic')}>
+            Logic map
+          </Button>
           <Button size="sm" onClick={() => setDialog('settings')}>
             Survey settings
           </Button>
@@ -344,6 +359,7 @@ function Editor({
               title={survey.title}
               pageKey={selectedPage}
               device={device}
+              theme={theme}
             />
           </aside>
         ) : null}
@@ -355,6 +371,16 @@ function Editor({
         definition={definition}
         anonymous={survey.anonymous}
         update={d.update}
+      />
+      <LogicMapDialog
+        open={dialog === 'logic'}
+        onClose={() => setDialog(null)}
+        def={definition}
+        numbers={numbers}
+        onPick={(key) => {
+          setDialog(null);
+          select(key);
+        }}
       />
       <ProblemsDialog
         open={dialog === 'problems'}
@@ -495,7 +521,7 @@ function OutlineItem({
         ⠿
       </span>
       <button className="min-w-0 flex-1 py-2 pr-2 text-left text-sm" onClick={() => onSelect(page.key)}>
-        <span className="block truncate font-medium">{page.title?.trim() || `Page ${index + 1}`}</span>
+        <span className="block truncate font-medium">{page.title?.trim() ? readableTokens(page.title, numbers) : `Page ${index + 1}`}</span>
         <span className="text-xs text-muted">
           {first ? (first === last ? `Question ${first}` : `Questions ${first}–${last}`) : 'No questions'}
         </span>
@@ -608,6 +634,7 @@ function Canvas({
         {definition.pages.map((page, pageIndex) => (
           <PageSection
             key={page.key}
+            def={definition}
             page={page}
             index={pageIndex}
             pageCount={definition.pages.length}
@@ -615,6 +642,7 @@ function Canvas({
             issues={issuesByKey.get(page.key) ?? []}
             onSelect={onSelect}
             onChangePage={(patch) => update((def) => updatePage(def, page.key, patch))}
+            onChangeRules={(rules) => update((def) => ({ ...def, logic: rules.length ? rules : undefined }))}
             onMovePage={(delta) => update((def) => movePage(def, pageIndex, pageIndex + delta))}
             onDeletePage={() => onDelete('page', page.key)}
             onAdd={(element) => onAdd(page.key, element)}
@@ -622,6 +650,7 @@ function Canvas({
             {page.elements.map((element) => (
               <ElementCard
                 key={element.key}
+                def={definition}
                 element={element}
                 number={numbers.get(element.key)}
                 selected={selected === element.key}
@@ -677,6 +706,7 @@ function Canvas({
 }
 
 function PageSection({
+  def,
   page,
   index,
   pageCount,
@@ -684,11 +714,13 @@ function PageSection({
   issues,
   onSelect,
   onChangePage,
+  onChangeRules,
   onMovePage,
   onDeletePage,
   onAdd,
   children,
 }: {
+  def: SurveyDefinition;
   page: Page;
   index: number;
   pageCount: number;
@@ -696,6 +728,7 @@ function PageSection({
   issues: Issue[];
   onSelect: (key: string | null) => void;
   onChangePage: (patch: Partial<Page>) => void;
+  onChangeRules: (rules: NonNullable<SurveyDefinition['logic']>) => void;
   onMovePage: (delta: -1 | 1) => void;
   onDeletePage: () => void;
   onAdd: (element: Element) => void;
@@ -703,6 +736,10 @@ function PageSection({
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `page:${page.key}` });
   const [showDescription, setShowDescription] = useState(Boolean(page.description));
+  const ruleCount = (def.logic ?? []).filter((r) => r.afterPage === page.key).length;
+  const logicCount = ruleCount + (page.visibleIf ? 1 : 0);
+  const [showLogic, setShowLogic] = useState(false);
+  const pageSources = useMemo(() => sourcesBefore(def, { pageKey: page.key }), [def, page.key]);
   return (
     <section
       id={`el-${page.key}`}
@@ -732,6 +769,9 @@ function PageSection({
           aria-expanded={showDescription}
         >
           Description
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setShowLogic((v) => !v)} aria-expanded={showLogic}>
+          Logic{logicCount ? <Badge className="bg-brand-50 text-brand-700">{logicCount}</Badge> : null}
         </Button>
         <Button
           size="sm"
@@ -766,6 +806,21 @@ function PageSection({
           onChange={(e) => onChangePage({ description: e.target.value || undefined })}
         />
       ) : null}
+      {showLogic ? (
+        <div className="mb-3 flex flex-col gap-3">
+          <VisibilityEditor
+            def={def}
+            condition={page.visibleIf}
+            sources={pageSources}
+            what="page"
+            onChange={(visibleIf) => {
+              const { visibleIf: _, ...rest } = page;
+              onChangePage(visibleIf ? { visibleIf } : { ...rest, visibleIf: undefined });
+            }}
+          />
+          <PageRulesEditor def={def} pageKey={page.key} onChange={onChangeRules} />
+        </div>
+      ) : null}
       <IssueList issues={issues} />
       <SortableContext items={page.elements.map((e) => e.key)} strategy={verticalListSortingStrategy}>
         <div
@@ -789,6 +844,7 @@ function PageSection({
 }
 
 function ElementCard({
+  def,
   element,
   number,
   selected,
@@ -802,6 +858,7 @@ function ElementCard({
   onMoveToPage,
   onDelete,
 }: {
+  def: SurveyDefinition;
   element: Element;
   number: number | undefined;
   selected: boolean;
@@ -860,6 +917,7 @@ function ElementCard({
             {element.kind === 'question' ? QUESTION_TYPE_META[element.type].label : 'Text'}
           </span>
           {element.kind === 'question' && element.required ? <Badge>Required</Badge> : null}
+          {element.visibleIf ? <Badge className="bg-brand-50 text-brand-700">Conditional</Badge> : null}
           {errorCount ? <Badge className="bg-red-100 text-red-800">⚠ {errorCount}</Badge> : null}
         </button>
         <div className="flex shrink-0 items-center">
@@ -879,19 +937,19 @@ function ElementCard({
       </div>
       {selected ? (
         <div className="border-t border-line px-4 py-4">
-          <ElementEditor element={element} issues={issues} onChange={onChange} />
+          <ElementEditor element={element} issues={issues} def={def} pageKey={currentPage} onChange={onChange} />
           {pages.length > 1 ? (
             <label className="mt-4 flex items-center gap-2 text-sm text-muted">
               Move to
               <select
-                className="rounded-md border border-line px-2 py-1 text-sm text-ink"
+                className="min-w-0 max-w-full rounded-md border border-line px-2 py-1 text-sm text-ink"
                 value={currentPage}
                 onChange={(e) => onMoveToPage(e.target.value)}
               >
                 {pages.map((p, i) => (
                   <option key={p.key} value={p.key}>
                     Page {i + 1}
-                    {p.title ? `: ${p.title}` : ''}
+                    {p.title ? `: ${readableTokens(p.title, new Map())}` : ''}
                   </option>
                 ))}
               </select>
@@ -905,20 +963,32 @@ function ElementCard({
 
 function AddElementMenu({ onAdd }: { onAdd: (element: Element) => void }) {
   const [open, setOpen] = useState(false);
+  const [bank, setBank] = useState(false);
   const pick = (element: Element) => {
     onAdd(element);
     setOpen(false);
   };
   return (
     <div className="mt-3">
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button size="sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
           + Add question
         </Button>
         <Button size="sm" variant="ghost" onClick={() => pick(createTextBlock(''))}>
           + Add text
         </Button>
+        <Button size="sm" variant="ghost" onClick={() => setBank(true)}>
+          + From question bank
+        </Button>
       </div>
+      <BankDialog
+        open={bank}
+        onClose={() => setBank(false)}
+        onPick={(q) => {
+          setBank(false);
+          pick(q);
+        }}
+      />
       {open ? (
         <ul className="mt-2 grid gap-2 sm:grid-cols-2" aria-label="Question types">
           {QUESTION_TYPES.map((type: QuestionType) => (
@@ -940,6 +1010,47 @@ function AddElementMenu({ onAdd }: { onAdd: (element: Element) => void }) {
 }
 
 // ── Dialogs ────────────────────────────────────────────────────────────────
+function BankDialog({ open, onClose, onPick }: { open: boolean; onClose: () => void; onPick: (q: Element) => void }) {
+  const [q, setQ] = useState('');
+  const items = useQuery({
+    queryKey: ['question-bank', q],
+    queryFn: () => get<BankItem[]>(`/question-bank${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`),
+    enabled: open,
+  });
+  return (
+    <Dialog open={open} onClose={onClose} title="Question bank" wide>
+      <div className="flex flex-col gap-3">
+        <TextField label="Search" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. satisfaction" />
+        {items.isLoading ? <p className="text-sm text-muted">Loading…</p> : null}
+        {items.error ? <Alert tone="error">{errorMessage(items.error)}</Alert> : null}
+        {items.data && items.data.length === 0 ? (
+          <p className="text-sm text-muted">
+            {q ? 'No saved questions match.' : 'No saved questions yet. Open a question and choose "Save to question bank".'}
+          </p>
+        ) : null}
+        <ul className="flex flex-col divide-y divide-line">
+          {(items.data ?? []).map((item) => (
+            <li key={item.id} className="flex items-center gap-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">{item.question.title}</div>
+                <div className="text-xs text-muted">
+                  {QUESTION_TYPE_META[item.question.type].label}
+                  {item.tags.length ? ` · ${item.tags.join(', ')}` : ''}
+                  {item.createdBy ? ` · added by ${item.createdBy}` : ''}
+                </div>
+              </div>
+              {/* Fresh keys every time, so the same bank question can be inserted twice. */}
+              <Button size="sm" onClick={() => onPick(bankQuestion(item.question))}>
+                Insert
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </Dialog>
+  );
+}
+
 function SurveySettingsDialog({
   open,
   onClose,
@@ -959,6 +1070,17 @@ function SurveySettingsDialog({
   const fields = definition.hiddenFields;
   const setFields = (next: SurveyDefinition['hiddenFields']) =>
     update((def) => ({ ...def, hiddenFields: next }));
+  const lastPage = definition.pages.at(-1)!.key;
+  const sources = useMemo(() => sourcesBefore(definition, { pageKey: lastPage, throughPage: true }), [definition, lastPage]);
+  const setThankYou = (patch: Partial<SurveyDefinition['settings']['thankYou']>) => {
+    const next = { ...settings.thankYou, ...patch } as Record<string, unknown>;
+    for (const k of ['redirectUrl', 'appendHiddenFields']) if (next[k] === '' || next[k] === false || next[k] === undefined) delete next[k];
+    setSettings({ thankYou: next as SurveyDefinition['settings']['thankYou'] });
+  };
+  const thankTitle = usePipeTarget(settings.thankYou.title, (v) => setThankYou({ title: v }));
+  const thankBody = usePipeTarget(settings.thankYou.body, (v) => setThankYou({ body: v }));
+  const screenOut = settings.disqualified ?? { title: 'Thank you for your time', body: "Unfortunately you don't qualify for this survey." };
+  const usesScreenOut = (definition.logic ?? []).some((r) => 'disqualify' in r.then);
   return (
     <Dialog
       open={open}
@@ -985,18 +1107,36 @@ function SurveySettingsDialog({
           />
         </div>
         <fieldset className="flex flex-col gap-3">
-          <legend className="mb-1 text-sm font-semibold">Thank-you message</legend>
+          <legend className="mb-1 text-sm font-semibold">Thank-you page</legend>
+          <div className="flex justify-end">
+            <PipeMenu sources={sources} onInsert={thankBody.insert} label="Insert answer in message" />
+          </div>
+          <TextField label="Title" value={settings.thankYou.title} onChange={(e) => setThankYou({ title: e.target.value })} {...thankTitle.trackProps} />
+          <TextArea label="Message" rows={3} value={settings.thankYou.body} onChange={(e) => setThankYou({ body: e.target.value })} {...thankBody.trackProps} />
           <TextField
-            label="Title"
-            value={settings.thankYou.title}
-            onChange={(e) => setSettings({ thankYou: { ...settings.thankYou, title: e.target.value } })}
+            label="Then send respondents to (optional)"
+            type="url"
+            placeholder="https://example.com/thanks"
+            hint="Redirects straight after submitting. Use {{q.…}} or {{param.…}} tokens to pass answers along."
+            value={settings.thankYou.redirectUrl ?? ''}
+            onChange={(e) => setThankYou({ redirectUrl: e.target.value })}
           />
-          <TextArea
-            label="Message"
-            rows={3}
-            value={settings.thankYou.body}
-            onChange={(e) => setSettings({ thankYou: { ...settings.thankYou, body: e.target.value } })}
-          />
+          {settings.thankYou.redirectUrl ? (
+            <Checkbox
+              label="Add the hidden fields to the redirect URL"
+              hint="For example, panel providers often need their respondent ID passed back."
+              checked={Boolean(settings.thankYou.appendHiddenFields)}
+              onChange={(e) => setThankYou({ appendHiddenFields: e.target.checked })}
+            />
+          ) : null}
+        </fieldset>
+        <fieldset className="flex flex-col gap-3">
+          <legend className="mb-1 text-sm font-semibold">Screen-out message</legend>
+          <p className="text-sm text-muted">
+            {usesScreenOut ? 'Shown to respondents a logic rule screens out.' : 'Shown when a logic rule screens a respondent out. No rule does yet.'}
+          </p>
+          <TextField label="Title" value={screenOut.title} onChange={(e) => setSettings({ disqualified: { ...screenOut, title: e.target.value } })} />
+          <TextArea label="Message" rows={2} value={screenOut.body} onChange={(e) => setSettings({ disqualified: { ...screenOut, body: e.target.value } })} />
         </fieldset>
         <fieldset className="flex flex-col gap-2">
           <legend className="text-sm font-semibold">Hidden fields</legend>

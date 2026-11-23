@@ -1,15 +1,20 @@
 # Survey Management System
 
-A multi-tenant platform for building, publishing and analysing surveys. **Phase 1 (MVP) is implemented:**
+A multi-tenant platform for building, publishing and analysing surveys. **Phase 1 (MVP) and Phase 2A (builder
+power) are implemented:**
 
 - authentication, organizations and role-based access
-- a drag-and-drop builder with 10 question types and live preview
+- a drag-and-drop builder with 16 question types and live preview
+- conditional logic (show/hide, skip, end, screen out; AND/OR/NOT), piping, and a logic map
+- themes, templates, a question bank, file uploads with malware scanning
+- password protection, open and close dates, CAPTCHA, response-quality flags
 - versioned publishing and public links with QR codes
 - a fast, accessible respondent app that never loses answers
 - a results dashboard, a response viewer and CSV export
 
 Design documents live in [`docs/`](docs/README.md): architecture, data model, API, roadmap, risks. Progress against
-the Phase 1 acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/phase-1-status.md).
+the acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/phase-1-status.md) and
+[`docs/phase-2a-status.md`](docs/phase-2a-status.md).
 
 ## Quick start
 
@@ -24,7 +29,7 @@ the Phase 1 acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/ph
 ```sh
 corepack enable                # provides `pnpm` (or: npm install -g pnpm@10)
 cp .env.example .env
-docker compose up -d           # Postgres 17, Redis 7, Mailpit
+docker compose up -d           # Postgres 17, Redis 7, Mailpit, S3 (SeaweedFS)
 pnpm install
 pnpm db:migrate
 pnpm db:seed                   # demo data; resets the database
@@ -40,6 +45,15 @@ If `corepack enable` fails with a permissions error, run `npm install -g pnpm@10
 | Respondent app | http://localhost:5174/s/{publicId} |
 | API | http://localhost:3000 (`/healthz`, `/readyz`) |
 | Mailpit (catches every email in development) | http://localhost:8025 |
+| S3-compatible storage (uploads, logos) | http://localhost:8333 |
+
+**Malware scanning (optional locally):** uploads are only downloadable after a scan. In development
+`MALWARE_SCANNER=disabled` marks them clean without scanning. To scan for real, start ClamAV (the first start
+downloads virus signatures, a few minutes) and set `MALWARE_SCANNER=clamav`:
+
+```sh
+docker compose --profile scan up -d clamav
+```
 
 ### Demo accounts (development only)
 
@@ -54,8 +68,9 @@ If `corepack enable` fails with a permissions error, run `npm install -g pnpm@10
 | `super@survey.local` | Platform super admin with no org membership, so it has no access to org data |
 
 The seed creates three surveys with about 500 responses each: an NPS survey, an anonymous employee pulse, and an
-event survey with two versions. It also creates a draft survey. `pnpm db:seed:large` adds a 50,000-response survey
-for performance checks.
+event survey with two versions. It also creates a draft survey and a *Product research* survey (300 responses) that
+uses logic and the Phase 2A question types, an *Acme brand* theme set as Acme's default, four global templates and a
+question-bank entry. `pnpm db:seed:large` adds a 50,000-response survey for performance checks.
 
 ## Scripts
 
@@ -65,7 +80,7 @@ for performance checks.
 | `pnpm verify` | Lint, typecheck, unit and integration tests, respondent bundle budget. Run before every PR. |
 | `pnpm test:unit` | `survey-core` engine tests (no database needed) |
 | `pnpm test:integration` | API tests against a real Postgres (`survey_test`) and Redis (db 15) |
-| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. |
+| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, logic (shared vectors), piping XSS, uploads, themes, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. |
 | `pnpm perf:results` | Analytics latency on the 50k seed. Writes `perf/results-summary.md`. |
 | `pnpm --filter @survey/e2e lighthouse` | Respondent load time (LCP) on simulated slow 4G. Writes `perf/lighthouse-respondent.md`. Needs the API running. |
 | `pnpm db:migrate` / `pnpm db:reset` | Apply migrations / drop everything and re-migrate (development only) |
@@ -89,8 +104,13 @@ perf/           Committed performance reports
 
 ## How it's built (short version)
 
-- **One survey engine.** `@survey/core` validates answers and walks pages in the builder preview, the respondent's
-  browser and the server. The server never trusts the client: it re-checks every answer on completion.
+- **One survey engine.** `@survey/core` validates answers, evaluates logic and walks pages in the builder preview,
+  the respondent's browser and the server. The server never trusts the client: on completion it replays the logic,
+  discards answers to questions the respondent shouldn't have seen, and re-checks every answer. Shared test vectors
+  (`packages/survey-core/test-vectors/`) run in all three places.
+- **Uploads.** Files go through the API, which checks the real type from the bytes and the size before storing them
+  in S3. Nothing is downloadable until ClamAV says it's clean; infected files are quarantined and the response is
+  flagged.
 - **Versioning.** Survey content is an immutable JSON document per version (the database refuses edits to a
   published version). Responses keep their version.
 - **Tenant isolation in the database.** The API connects as `survey_app`, a role without `BYPASSRLS`. Every
@@ -117,6 +137,11 @@ Every variable is documented in [`.env.example`](.env.example). For production:
 - Set `TRUST_PROXY=true` behind a load balancer.
 - Set `APP_URL` and `RESPONDENT_URL` to the public origins.
 - Set `SENTRY_DSN` if you want error tracking.
+- Point `S3_*` at your bucket (any S3-compatible store) and run ClamAV: the API refuses to start in production
+  unless `MALWARE_SCANNER=clamav`.
+- Set `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` from Cloudflare if surveys use the CAPTCHA option (the
+  `.env.example` values are Cloudflare's always-pass test keys). The respondent app loads the widget from
+  `challenges.cloudflare.com`, so allow it in any Content-Security-Policy.
 - Run migrations as the database owner (superuser or `BYPASSRLS`, because of the narrow `SECURITY DEFINER`
   functions). Run the API and worker as `survey_app`.
 
@@ -132,3 +157,7 @@ routed to the API on the same origins.
   URLs in `.env`.
 - **The respondent app or builder preview shows development React warnings:** don't set `NODE_ENV` in `.env`.
   Vite reads that file.
+- **Uploads fail with a storage error:** check the `s3` container is running (`docker compose ps`). The API creates
+  the bucket on start when `S3_CREATE_BUCKET=true`.
+- **Uploaded files stay "Checking for malware…":** the worker isn't running (it runs with `pnpm dev`), or
+  `MALWARE_SCANNER=clamav` is set but ClamAV is still starting.

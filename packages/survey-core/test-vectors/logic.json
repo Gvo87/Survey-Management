@@ -1,0 +1,169 @@
+{
+  "$comment": "Shared logic test vectors. Run against the engine (unit tests), the API completion endpoint (integration tests) and the real browser build (Playwright), so logic provably behaves the same everywhere.",
+  "definition": {
+    "schemaVersion": 1,
+    "defaultLocale": "en",
+    "hiddenFields": [{ "key": "src", "nonIdentifying": true }],
+    "settings": {
+      "showProgressBar": true,
+      "allowBack": true,
+      "thankYou": { "title": "Thanks", "body": "Done" },
+      "disqualified": { "title": "Sorry", "body": "You don't qualify." }
+    },
+    "logic": [
+      {
+        "id": "r_vecrule01",
+        "afterPage": "p_vecpage01",
+        "when": { "source": { "question": "q_vecage001" }, "op": "eq", "value": "o_vecu18001" },
+        "then": { "disqualify": true }
+      },
+      {
+        "id": "r_vecrule02",
+        "afterPage": "p_vecpage01",
+        "when": {
+          "all": [
+            { "source": { "question": "q_vecuse001" }, "op": "contains_any", "value": ["o_vecnone01"] },
+            { "not": { "source": { "hidden": "src" }, "op": "eq", "value": "panel" } }
+          ]
+        },
+        "then": { "end": true }
+      }
+    ],
+    "pages": [
+      {
+        "key": "p_vecpage01",
+        "elements": [
+          {
+            "kind": "question",
+            "key": "q_vecage001",
+            "type": "single_choice",
+            "title": "Age",
+            "required": true,
+            "options": [
+              { "key": "o_vecu18001", "label": "Under 18" },
+              { "key": "o_vec18a001", "label": "18-34" },
+              { "key": "o_vec35a001", "label": "35+" }
+            ],
+            "config": { "randomize": false }
+          },
+          {
+            "kind": "question",
+            "key": "q_vecuse001",
+            "type": "multi_choice",
+            "title": "Which do you use?",
+            "required": false,
+            "options": [
+              { "key": "o_vecweb001", "label": "Web" },
+              { "key": "o_vecapp001", "label": "App" },
+              { "key": "o_vecnone01", "label": "None", "exclusive": true }
+            ],
+            "config": { "randomize": false }
+          },
+          {
+            "kind": "question",
+            "key": "q_vecapp001",
+            "type": "rating",
+            "title": "Rate the app",
+            "required": true,
+            "visibleIf": { "source": { "question": "q_vecuse001" }, "op": "contains_any", "value": ["o_vecapp001"] },
+            "config": { "scale": 5, "icon": "star" }
+          }
+        ]
+      },
+      {
+        "key": "p_vecpage02",
+        "visibleIf": {
+          "any": [
+            { "source": { "question": "q_vecuse001" }, "op": "contains_any", "value": ["o_vecweb001"] },
+            { "source": { "hidden": "src" }, "op": "eq", "value": "panel" }
+          ]
+        },
+        "elements": [
+          {
+            "kind": "question",
+            "key": "q_vecweb001",
+            "type": "nps",
+            "title": "Recommend the website?",
+            "required": true,
+            "config": { "lowLabel": "No", "highLabel": "Yes" }
+          }
+        ]
+      },
+      {
+        "key": "p_vecpage03",
+        "elements": [
+          {
+            "kind": "question",
+            "key": "q_vecmat001",
+            "type": "matrix",
+            "title": "Rate us",
+            "required": false,
+            "rows": [
+              { "key": "o_vecrowa01", "label": "Speed" },
+              { "key": "o_vecrowb01", "label": "Design" }
+            ],
+            "options": [
+              { "key": "o_veccolp01", "label": "Poor" },
+              { "key": "o_veccolg01", "label": "Good" }
+            ],
+            "config": { "multiplePerRow": false, "randomizeRows": false }
+          },
+          {
+            "kind": "question",
+            "key": "q_vecwhy001",
+            "type": "long_text",
+            "title": "Why wasn't speed good?",
+            "required": true,
+            "visibleIf": {
+              "not": {
+                "any": [
+                  { "all": [{ "source": { "question": "q_vecmat001", "sub": "o_vecrowa01" }, "op": "eq", "value": "o_veccolg01" }] },
+                  { "source": { "question": "q_vecmat001", "sub": "o_vecrowa01" }, "op": "not_answered" }
+                ]
+              }
+            },
+            "config": { "maxLength": 500 }
+          }
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "under 18 is disqualified after page 1",
+      "answers": { "q_vecage001": "o_vecu18001", "q_vecuse001": ["o_vecweb001"], "q_vecweb001": 9 },
+      "expect": { "ok": true, "outcome": "disqualified", "path": ["p_vecpage01"], "answeredKeys": ["q_vecage001", "q_vecuse001"], "errors": [] }
+    },
+    {
+      "name": "'None' ends the survey after page 1",
+      "answers": { "q_vecage001": "o_vec18a001", "q_vecuse001": ["o_vecnone01"] },
+      "expect": { "ok": true, "outcome": "completed", "path": ["p_vecpage01"], "answeredKeys": ["q_vecage001", "q_vecuse001"], "errors": [] }
+    },
+    {
+      "name": "panel respondents who chose 'None' continue (NOT), and see page 2 (OR on a hidden field)",
+      "hidden": { "src": "panel" },
+      "answers": { "q_vecage001": "o_vec18a001", "q_vecuse001": ["o_vecnone01"], "q_vecweb001": 8 },
+      "expect": { "ok": true, "outcome": "completed", "path": ["p_vecpage01", "p_vecpage02", "p_vecpage03"], "answeredKeys": ["q_vecage001", "q_vecuse001", "q_vecweb001"], "errors": [] }
+    },
+    {
+      "name": "app users skip page 2; its answer is dropped; poor speed makes 'why' visible and required",
+      "answers": { "q_vecage001": "o_vec35a001", "q_vecuse001": ["o_vecapp001"], "q_vecapp001": 4, "q_vecweb001": 3, "q_vecmat001": { "o_vecrowa01": "o_veccolp01" } },
+      "expect": { "ok": false, "outcome": "completed", "path": ["p_vecpage01", "p_vecpage03"], "answeredKeys": ["q_vecage001", "q_vecapp001", "q_vecmat001", "q_vecuse001"], "errors": ["q_vecwhy001"] }
+    },
+    {
+      "name": "the same respondent completes once 'why' is answered",
+      "answers": { "q_vecage001": "o_vec35a001", "q_vecuse001": ["o_vecapp001"], "q_vecapp001": 4, "q_vecweb001": 3, "q_vecmat001": { "o_vecrowa01": "o_veccolp01" }, "q_vecwhy001": "Slow on 4G" },
+      "expect": { "ok": true, "outcome": "completed", "path": ["p_vecpage01", "p_vecpage03"], "answeredKeys": ["q_vecage001", "q_vecapp001", "q_vecmat001", "q_vecuse001", "q_vecwhy001"], "errors": [] }
+    },
+    {
+      "name": "a question shown by a condition is required",
+      "answers": { "q_vecage001": "o_vec18a001", "q_vecuse001": ["o_vecweb001", "o_vecapp001"], "q_vecweb001": 10 },
+      "expect": { "ok": false, "outcome": "completed", "path": ["p_vecpage01", "p_vecpage02", "p_vecpage03"], "answeredKeys": ["q_vecage001", "q_vecuse001", "q_vecweb001"], "errors": ["q_vecapp001"] }
+    },
+    {
+      "name": "good speed hides 'why' and drops its answer",
+      "answers": { "q_vecage001": "o_vec18a001", "q_vecuse001": ["o_vecweb001"], "q_vecweb001": 7, "q_vecmat001": { "o_vecrowa01": "o_veccolg01", "o_vecrowb01": "o_veccolp01" }, "q_vecwhy001": "should be dropped" },
+      "expect": { "ok": true, "outcome": "completed", "path": ["p_vecpage01", "p_vecpage02", "p_vecpage03"], "answeredKeys": ["q_vecage001", "q_vecmat001", "q_vecuse001", "q_vecweb001"], "errors": [] }
+    }
+  ]
+}

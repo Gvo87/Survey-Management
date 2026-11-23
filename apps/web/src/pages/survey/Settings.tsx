@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Collaborator, Member, PageResult, SurveyDetail, SurveyRole } from '@survey/contracts';
+import type { Collaborator, Member, PageResult, SurveyDetail, SurveyRole, Theme } from '@survey/contracts';
 import { del, errorMessage, get, patch, post, put } from '../../api';
 import { useAuth } from '../../auth';
-import { Alert, Button, Card, ConfirmDialog, SelectField, TextField } from '../../components/ui';
+import { Alert, Button, Card, ConfirmDialog, Dialog, SelectField, TextArea, TextField } from '../../components/ui';
 import { useSurvey } from './SurveyLayout';
 
 export function SurveySettingsPage() {
@@ -15,6 +15,7 @@ export function SurveySettingsPage() {
   const canEdit = survey.myRole !== 'viewer';
   const [title, setTitle] = useState(survey.title);
   const [confirm, setConfirm] = useState<null | 'delete' | 'archive'>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
 
   const rename = useMutation({
     mutationFn: () => patch(`/surveys/${survey.id}`, { title }),
@@ -66,6 +67,8 @@ export function SurveySettingsPage() {
         </Card>
       ) : null}
 
+      {canEdit ? <ThemePicker survey={survey} onSaved={refresh} /> : null}
+
       <Collaborators survey={survey} canShare={isOwner} />
 
       <Card title="Other actions">
@@ -75,6 +78,7 @@ export function SurveySettingsPage() {
               Duplicate survey
             </Button>
           ) : null}
+          {canCreate ? <Button onClick={() => setSavingTemplate(true)}>Save as template</Button> : null}
           {canEdit && survey.status !== 'archived' ? (
             <Button onClick={() => setConfirm('archive')}>Archive</Button>
           ) : null}
@@ -91,6 +95,7 @@ export function SurveySettingsPage() {
         ) : null}
       </Card>
 
+      <SaveTemplateDialog open={savingTemplate} survey={survey} onClose={() => setSavingTemplate(false)} />
       <ConfirmDialog
         open={confirm === 'archive'}
         title="Archive survey?"
@@ -111,6 +116,97 @@ export function SurveySettingsPage() {
         onConfirm={() => remove.mutate()}
       />
     </div>
+  );
+}
+
+function ThemePicker({ survey, onSaved }: { survey: SurveyDetail; onSaved: () => void }) {
+  const themes = useQuery({ queryKey: ['themes'], queryFn: () => get<Theme[]>('/themes') });
+  const queryClient = useQueryClient();
+  const choose = useMutation({
+    mutationFn: (themeId: string | null) => patch(`/surveys/${survey.id}`, { themeId }),
+    onSuccess: () => {
+      onSaved();
+      void queryClient.invalidateQueries({ queryKey: ['themes'] });
+    },
+  });
+  const orgDefault = themes.data?.find((t) => t.isDefault);
+  return (
+    <Card title="Theme">
+      <div className="flex flex-wrap items-end gap-3">
+        <SelectField
+          label="Look of the survey"
+          className="min-w-64"
+          value={survey.themeId ?? ''}
+          disabled={choose.isPending}
+          onChange={(e) => choose.mutate(e.target.value || null)}
+        >
+          <option value="">Organization default{orgDefault ? ` (${orgDefault.name})` : ' (standard look)'}</option>
+          {(themes.data ?? []).map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </SelectField>
+        <Link to="/settings/themes" className="pb-2 text-sm text-brand-600 hover:underline">
+          Manage themes
+        </Link>
+      </div>
+      <p className="mt-2 text-xs text-muted">Themes apply immediately, including to a live survey. The preview in the builder shows it.</p>
+      {choose.error ? (
+        <Alert tone="error" className="mt-3">
+          {errorMessage(choose.error)}
+        </Alert>
+      ) : null}
+    </Card>
+  );
+}
+
+function SaveTemplateDialog({ open, survey, onClose }: { open: boolean; survey: SurveyDetail; onClose: () => void }) {
+  const [name, setName] = useState(survey.title);
+  const [description, setDescription] = useState('');
+  const [done, setDone] = useState(false);
+  const save = useMutation({
+    mutationFn: () => post(`/surveys/${survey.id}/save-as-template`, { name, description }),
+    onSuccess: () => setDone(true),
+  });
+  const close = () => {
+    setDone(false);
+    onClose();
+  };
+  return (
+    <Dialog
+      open={open}
+      onClose={close}
+      title="Save as template"
+      footer={
+        done ? (
+          <Button variant="primary" onClick={close}>
+            Done
+          </Button>
+        ) : (
+          <>
+            <Button onClick={close}>Cancel</Button>
+            <Button variant="primary" busy={save.isPending} disabled={!name.trim()} onClick={() => save.mutate()}>
+              Save template
+            </Button>
+          </>
+        )
+      }
+    >
+      {done ? (
+        <Alert tone="success">Saved. Everyone in your organization can now start a new survey from "{name}".</Alert>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-muted">
+            Saves a copy of the questions, pages, logic and settings (the latest draft, if there is one). Responses aren't
+            included.
+          </p>
+          <TextField label="Template name" value={name} onChange={(e) => setName(e.target.value)} />
+          <TextArea label="Description (optional)" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+          {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
+        </div>
+      )}
+    </Dialog>
   );
 }
 

@@ -320,6 +320,7 @@ describe('resume', () => {
       currentPageKey: 'p_page0001',
       seq: 1,
       answers: { [text]: 'halfway' },
+      hiddenFields: {},
     });
     const other = await ctx.app.inject({
       method: 'GET',

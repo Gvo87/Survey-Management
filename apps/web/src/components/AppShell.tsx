@@ -42,9 +42,14 @@ export function AppShell() {
               Members
             </NavLink>
             {org?.role === 'org_admin' ? (
-              <NavLink to="/settings/org" className={link}>
-                Organization
-              </NavLink>
+              <>
+                <NavLink to="/settings/themes" className={link}>
+                  Themes
+                </NavLink>
+                <NavLink to="/settings/org" className={link}>
+                  Organization
+                </NavLink>
+              </>
             ) : null}
           </nav>
           <div className="ml-auto flex items-center gap-3">

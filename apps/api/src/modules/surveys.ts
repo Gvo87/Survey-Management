@@ -8,6 +8,7 @@ import {
   SetCollaboratorRequest,
   TransferSurveyRequest,
   UpdateSurveyRequest,
+  type AccessSettings,
   type Collaborator,
   type Draft,
   type DraftValidation,
@@ -19,7 +20,7 @@ import {
   type VersionDetail,
   type VersionSummary,
 } from '@survey/contracts';
-import { createDefinition, validateDefinition, type SurveyDefinition } from '@survey/core';
+import { createDefinition, remapDefinitionKeys, validateDefinition, type SurveyDefinition } from '@survey/core';
 import { parseDefinition } from '@survey/core/schema';
 import {
   distributions,
@@ -31,6 +32,9 @@ import {
   surveyCollaborators,
   surveys,
   surveyVersions,
+  globalTemplates,
+  readAccess,
+  themes,
   users,
   withTenant,
   type SurveyAccess,
@@ -45,6 +49,7 @@ import { AppError, conflict, forbidden, notFound, unprocessable } from '../lib/e
 import { decodeCursor, encodeCursor } from '../lib/misc';
 import { testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
+import { hashPassword } from './auth';
 
 type SurveyRow = typeof surveys.$inferSelect;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -139,8 +144,10 @@ export async function buildDetail(
   return {
     ...summary!,
     anonymous: survey.anonymous,
-    access: survey.access,
+    access: publicAccess(survey.access),
     closedReason: effectiveStatus(survey).reason,
+    themeId: survey.themeId,
+    isTemplate: survey.isTemplate,
     createdAt: survey.createdAt.toISOString(),
     responseCount: count?.n ?? 0,
     testUrl:
@@ -148,6 +155,38 @@ export async function buildDetail(
         ? `${deps.config.respondentUrl}/s/${survey.publicId}?test=${testTokenFor(deps.config.sessionSecret, survey.id)}`
         : null,
   };
+}
+
+/** Access settings as the API shows them: the password hash is reduced to a flag. */
+export function publicAccess(access: SurveyAccess): AccessSettings {
+  const a = readAccess(access);
+  return {
+    closesAt: a.closesAt,
+    opensAt: a.opensAt,
+    quota: a.quota,
+    onePerBrowser: a.onePerBrowser,
+    captcha: a.captcha,
+    passwordEnabled: Boolean(a.passwordHash),
+  };
+}
+
+/** The definition to start from: a global template or one of this org's template surveys. */
+async function templateDefinition(tx: Tx, from: { kind: 'global' | 'org'; id: string }): Promise<SurveyDefinition> {
+  if (from.kind === 'global') {
+    const [row] = await tx.db.select().from(globalTemplates).where(eq(globalTemplates.id, from.id));
+    if (!row) throw notFound('Template');
+    return row.definition;
+  }
+  const [row] = await tx.db
+    .select()
+    .from(surveys)
+    .where(and(eq(surveys.id, from.id), eq(surveys.isTemplate, true), isNull(surveys.deletedAt)));
+  if (!row) throw notFound('Template');
+  const draft = await findDraft(tx, row.id);
+  const [current] = row.currentVersionId
+    ? await tx.db.select().from(surveyVersions).where(eq(surveyVersions.id, row.currentVersionId))
+    : [];
+  return (draft ?? current)?.definition ?? createDefinition();
 }
 
 async function publishedDefinitions(tx: Tx, surveyId: string): Promise<SurveyDefinition[]> {
@@ -173,7 +212,7 @@ async function validationFor(
   };
 }
 
-async function findDraft(tx: Tx, surveyId: string) {
+export async function findDraft(tx: Tx, surveyId: string) {
   const [draft] = await tx.db
     .select()
     .from(surveyVersions)
@@ -205,7 +244,7 @@ function parseIfMatch(header: string | undefined): number {
   return Number(match[1]);
 }
 
-async function createSurveyRecords(
+export async function createSurveyRecords(
   tx: Tx,
   auth: OrgAuth,
   input: { title: string; definition: SurveyDefinition; anonymous?: boolean; access?: SurveyAccess },
@@ -257,7 +296,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
     const auth = requireOrg(req);
     const query = parse(ListSurveysQuery, req.query);
     return withTenant(pool, auth.orgId, async (tx) => {
-      const conditions = [isNull(surveys.deletedAt)];
+      const conditions = [isNull(surveys.deletedAt), eq(surveys.isTemplate, false)];
       if (auth.orgRole !== 'org_admin') conditions.push(isNotNull(surveyCollaborators.role));
       if (query.status) conditions.push(eq(surveys.status, query.status));
       if (query.q) conditions.push(ilike(surveys.title, `%${query.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`));
@@ -296,9 +335,11 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
 
   app.post('/api/v1/surveys', async (req, reply) => {
     const auth = requireOrg(req, 'surveys.create');
-    const { title } = parse(CreateSurveyRequest, req.body);
+    const { title, fromTemplate } = parse(CreateSurveyRequest, req.body);
     const detail = await withTenant(pool, auth.orgId, async (tx) => {
-      const survey = await createSurveyRecords(tx, auth, { title, definition: createDefinition() });
+      // Fresh keys for everything copied from a template, so no two surveys share keys.
+      const definition = fromTemplate ? remapDefinitionKeys(await templateDefinition(tx, fromTemplate)) : createDefinition();
+      const survey = await createSurveyRecords(tx, auth, { title, definition });
       await audit(tx, {
         orgId: auth.orgId,
         actorId: auth.userId,
@@ -338,12 +379,23 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
             "Anonymity can't be changed after responses have been collected. Duplicate the survey instead.",
           );
       }
+      if (body.themeId) {
+        const [theme] = await tx.db.select({ id: themes.id }).from(themes).where(eq(themes.id, body.themeId));
+        if (!theme) throw unprocessable('invalid_theme', "That theme doesn't exist.");
+      }
+      let access: SurveyAccess | undefined;
+      if (body.access) {
+        const { password, ...rest } = body.access;
+        access = { ...survey.access, ...rest };
+        if (password !== undefined) access.passwordHash = password === null ? null : await hashPassword(password);
+      }
       const [updated] = await tx.db
         .update(surveys)
         .set({
           ...(body.title !== undefined ? { title: body.title } : {}),
           ...(body.anonymous !== undefined ? { anonymous: body.anonymous } : {}),
-          ...(body.access ? { access: { ...survey.access, ...body.access } } : {}),
+          ...(access ? { access } : {}),
+          ...(body.themeId !== undefined ? { themeId: body.themeId } : {}),
           updatedAt: new Date(),
         })
         .where(eq(surveys.id, survey.id))
@@ -354,7 +406,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         action: 'survey.updated',
         entityType: 'survey',
         entityId: survey.id,
-        metadata: { fields: Object.keys(body) },
+        metadata: { fields: Object.keys(body), ...(body.access?.password !== undefined ? { password: body.access.password ? 'set' : 'removed' } : {}) },
         ip: req.ip,
       });
       return buildDetail(deps, tx, updated!, role);
@@ -396,7 +448,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         title: body.title ?? `Copy of ${survey.title}`.slice(0, 300),
         definition,
         anonymous: survey.anonymous,
-        access: { closesAt: null, quota: null, onePerBrowser: survey.access.onePerBrowser },
+        access: { closesAt: null, quota: null, onePerBrowser: readAccess(survey.access).onePerBrowser, captcha: readAccess(survey.access).captcha },
       });
       await audit(tx, {
         orgId: auth.orgId,
@@ -610,6 +662,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
     return withTenant(pool, auth.orgId, async (tx) => {
       const { survey, role } = await loadSurvey(tx, auth, req.params.id, 'survey.publish');
       await tx.client.query('select 1 from surveys where id = $1 for update', [survey.id]);
+      if (survey.isTemplate) throw conflict('template_not_publishable', "Templates can't be published. Create a survey from it instead.");
       const draft = await findDraft(tx, survey.id);
       if (!draft) throw conflict('no_draft', 'There are no unpublished changes.');
       if (draft.revision !== revision)

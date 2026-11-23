@@ -1,7 +1,8 @@
 # Survey Management System: Design Docs
 
-**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phase 1 is implemented**;
-see [phase-1-status.md](phase-1-status.md) for each acceptance criterion and its evidence.
+**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phase 1 and Phase 2A are
+implemented**; see [phase-1-status.md](phase-1-status.md) and [phase-2a-status.md](phase-2a-status.md) for each
+acceptance criterion and its evidence.
 
 | # | Document | Contents |
 |---|---|---|
@@ -11,6 +12,7 @@ see [phase-1-status.md](phase-1-status.md) for each acceptance criterion and its
 | 4 | [Roadmap and acceptance criteria](04-roadmap.md) | Phases 1, 2A, 2B and 3, scope, build order, checklists |
 | 5 | [Risks and flags](05-risks.md) | Conflicts in the requirements, risks, expensive items |
 | - | [Phase 1 status](phase-1-status.md) | Every Phase 1 acceptance criterion: verified, partly verified, or open |
+| - | [Phase 2A status](phase-2a-status.md) | Every Phase 2A acceptance criterion, plus where the build deviates from the design |
 | - | [Accessibility record](a11y-p1.md) | Automated WCAG checks done; manual screen-reader checklist |
 
 ## Key decisions

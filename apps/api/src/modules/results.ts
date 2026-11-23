@@ -43,6 +43,7 @@ import { csvRow, UTF8_BOM } from '../lib/csv';
 import { decodeCursor, encodeCursor, iso, slugify } from '../lib/misc';
 import { parse } from '../lib/validate';
 import { loadSurvey } from './surveys';
+import { filesForResponses } from './respondent';
 
 type SurveyRow = typeof surveys.$inferSelect;
 type ResponseRow = typeof responses.$inferSelect;
@@ -67,6 +68,10 @@ interface Filter {
   versionId?: string;
   includeTest: boolean;
   statuses?: ('in_progress' | 'completed' | 'disqualified')[];
+  /** Leave out responses with any quality flag. */
+  excludeFlagged?: boolean;
+  /** Only responses with this quality flag. */
+  flag?: string;
 }
 
 /** WHERE conditions on `responses r`. Every value is a bound parameter. */
@@ -77,6 +82,8 @@ function responseConditions(p: Params, surveyId: string, f: Filter): string {
   if (f.from) parts.push(`r.started_at >= ${p.add(f.from)}::timestamptz`);
   if (f.to) parts.push(`r.started_at < ${p.add(f.to)}::timestamptz`);
   if (f.statuses) parts.push(`r.status = any(${p.add(f.statuses)}::text[])`);
+  if (f.excludeFlagged) parts.push(`r.quality_flags = '{}'`);
+  if (f.flag) parts.push(`${p.add(f.flag)} = any(r.quality_flags)`);
   return parts.join(' and ');
 }
 
@@ -110,7 +117,8 @@ export function questionUnion(versions: VersionInfo[], currentVersionId: string 
   return [...seen.values()];
 }
 
-type Buckets = Map<string, Map<string, number>>; // questionKey → bucket → count (sub_key '' only in Phase 1)
+/** questionKey → sub_key (matrix row / ranked option; '' otherwise) → bucket → count */
+type Buckets = Map<string, Map<string, Map<string, number>>>;
 
 function median(distribution: { value: number; count: number }[], total: number): number | null {
   if (total === 0) return null;
@@ -131,9 +139,10 @@ const round = (n: number, digits = 2) => Math.round(n * 10 ** digits) / 10 ** di
 function summarizeQuestion(
   question: Question,
   removed: boolean,
-  buckets: Map<string, number>,
+  subBuckets: Map<string, Map<string, number>>,
   latest: { responseId: string; text: string }[],
 ): QuestionSummary {
+  const buckets = subBuckets.get('') ?? new Map<string, number>();
   const answered = buckets.get(ANSWERED_BUCKET) ?? 0;
   const base = {
     questionKey: question.key,
@@ -208,6 +217,56 @@ function summarizeQuestion(
         score: total ? Math.round(((promoters - detractors) / total) * 100) : null,
       };
     }
+    case 'matrix': {
+      const rows = question.rows.map((r) => ({
+        key: r.key,
+        label: r.label,
+        answered: subBuckets.get(r.key)?.get(ANSWERED_BUCKET) ?? 0,
+      }));
+      return {
+        ...base,
+        // People who answered at least one row: the busiest row is the best available lower bound.
+        answered: Math.max(0, ...rows.map((r) => r.answered)),
+        type: 'matrix',
+        rows,
+        columns: question.options.map((c) => ({ key: c.key, label: c.label })),
+        counts: question.rows.map((r) => question.options.map((c) => subBuckets.get(r.key)?.get(c.key) ?? 0)),
+      };
+    }
+    case 'ranking': {
+      const options = question.options
+        .map((o) => {
+          const b = subBuckets.get(o.key) ?? new Map<string, number>();
+          const ranks = [...b.entries()]
+            .filter(([k]) => k !== ANSWERED_BUCKET)
+            .map(([k, count]) => ({ value: Number(k), count }));
+          return {
+            key: o.key,
+            label: o.label,
+            meanRank: mean(ranks),
+            firstPlace: b.get('1') ?? 0,
+            ranked: ranks.reduce((sum, r) => sum + r.count, 0),
+          };
+        })
+        .sort((a, b) => (a.meanRank ?? Infinity) - (b.meanRank ?? Infinity));
+      // Every ranking has exactly one first place, so first places add up to the people who ranked.
+      return { ...base, answered: options.reduce((sum, o) => sum + o.firstPlace, 0), type: 'ranking', options };
+    }
+    case 'slider': {
+      const values = [...buckets.entries()]
+        .filter(([k]) => k !== ANSWERED_BUCKET)
+        .map(([k, count]) => ({ value: Number(k), count }));
+      const { min, max } = question.config;
+      const bins = 10;
+      const width = (max - min) / bins;
+      const histogram = Array.from({ length: bins }, (_, i) => ({ from: round(min + i * width), to: round(min + (i + 1) * width), count: 0 }));
+      for (const v of values) histogram[Math.min(bins - 1, Math.max(0, Math.floor((v.value - min) / width)))]!.count += v.count;
+      return { ...base, type: 'slider', min, max, mean: mean(values), median: median(values, answered), histogram };
+    }
+    case 'file_upload':
+      return { ...base, type: 'file_upload', files: answered };
+    case 'consent':
+      return { ...base, type: 'consent', agreed: buckets.get('1') ?? 0 };
     case 'date': {
       const byDay = [...buckets.entries()]
         .filter(([key]) => key !== ANSWERED_BUCKET)
@@ -218,6 +277,7 @@ function summarizeQuestion(
     case 'short_text':
     case 'long_text':
     case 'email':
+    case 'phone':
       return { ...base, type: question.type, latest };
   }
 }
@@ -248,12 +308,13 @@ export async function computeSummary(
   if (versions.length === 0) return empty;
 
   const isDefaultView =
-    !query.from && !query.to && !query.versionId && !query.includePartial && !query.includeTest;
+    !query.from && !query.to && !query.versionId && !query.includePartial && !query.includeTest && !query.excludeFlagged;
   const filter: Filter = {
     from: query.from,
     to: query.to,
     versionId: query.versionId,
     includeTest: query.includeTest,
+    excludeFlagged: query.excludeFlagged,
   };
 
   // Totals: cheap index scans on responses, always live.
@@ -312,16 +373,16 @@ export async function computeSummary(
   const bp = new Params();
   const bucketRows = isDefaultView
     ? (
-        await tx.client.query<{ question_key: string; bucket: string; count: number }>(
-          `select question_key, bucket, sum(count)::int as count from question_counts
-            where survey_id = ${bp.add(survey.id)} and sub_key = '' group by 1, 2`,
+        await tx.client.query<{ question_key: string; sub_key: string; bucket: string; count: number }>(
+          `select question_key, sub_key, bucket, sum(count)::int as count from question_counts
+            where survey_id = ${bp.add(survey.id)} group by 1, 2, 3`,
           bp.values,
         )
       ).rows
     : (
-        await tx.client.query<{ question_key: string; bucket: string; count: number }>(
+        await tx.client.query<{ question_key: string; sub_key: string; bucket: string; count: number }>(
           bucketCountsSql(
-            `${responseConditions(bp, survey.id, { ...filter, statuses: query.includePartial ? ['completed', 'in_progress'] : ['completed'] })} and a.sub_key = ''`,
+            responseConditions(bp, survey.id, { ...filter, statuses: query.includePartial ? ['completed', 'in_progress'] : ['completed'] }),
             { byVersion: false },
           ),
           bp.values,
@@ -329,12 +390,14 @@ export async function computeSummary(
       ).rows;
   for (const row of bucketRows) {
     if (!buckets.has(row.question_key)) buckets.set(row.question_key, new Map());
-    buckets.get(row.question_key)!.set(row.bucket, row.count);
+    const bySub = buckets.get(row.question_key)!;
+    if (!bySub.has(row.sub_key)) bySub.set(row.sub_key, new Map());
+    bySub.get(row.sub_key)!.set(row.bucket, row.count);
   }
 
   const union = questionUnion(versions, survey.currentVersionId);
   const textKeys = union
-    .filter(({ question }) => ['short_text', 'long_text', 'email'].includes(question.type))
+    .filter(({ question }) => ['short_text', 'long_text', 'email', 'phone'].includes(question.type))
     .map(({ question }) => question.key);
   const latest = new Map<string, { responseId: string; text: string }[]>();
   if (textKeys.length) {
@@ -480,12 +543,13 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         to: query.to,
         includeTest: query.includeTest,
         statuses: query.status === 'all' ? undefined : [query.status],
+        flag: query.flag,
       });
       const { rows } = await tx.client.query<
         ResponseRow & { version_number: number; distribution_name: string | null }
       >(
         `select r.id, r.status, r.is_test, r.started_at, r.completed_at, r.duration_ms, r.device_type, r.version_id,
-                v.version_number, d.name as distribution_name
+                r.quality_flags, v.version_number, d.name as distribution_name
            from responses r
            join survey_versions v on v.id = r.version_id
            left join distributions d on d.id = r.distribution_id
@@ -506,6 +570,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         version_id: string;
         version_number: number;
         distribution_name: string | null;
+        quality_flags: string[];
       }[];
       const versions = await loadVersions(tx, survey.id);
       const cells = await loadCells(
@@ -531,6 +596,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           distributionName: r.distribution_name,
           deviceType: r.device_type,
           preview: first ? String(first.value).slice(0, 140) : '',
+          qualityFlags: r.quality_flags,
         };
       });
       const last = page.at(-1);
@@ -580,8 +646,17 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           distributionName: row.distributionName,
           deviceType: row.r.deviceType,
           preview: '',
+          qualityFlags: row.r.qualityFlags,
           hiddenFields: row.r.hiddenFields,
           answers,
+          files: (await filesForResponses(tx, [row.r.id])).map((f) => ({
+            id: f.id,
+            filename: f.filename,
+            size: f.size,
+            mime: f.mime,
+            scanStatus: f.scanStatus,
+            questionKey: f.questionKey,
+          })),
         };
       });
     },
@@ -601,7 +676,9 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           .for('update');
         if (!row) throw notFound('Response');
         await unaggregateResponse(tx.client, survey.id, row.id);
+        const uploads = await filesForResponses(tx, [row.id]);
         await tx.db.delete(responses).where(eq(responses.id, row.id));
+        if (uploads.length) await deps.jobs.enqueue(tx, 'files.delete-objects', { keys: uploads.map((f) => f.storageKey) });
         if (row.status === 'completed' && !row.isTest)
           await tx.client.query(
             'update surveys set completed_count = greatest(completed_count - 1, 0) where id = $1',
@@ -641,12 +718,14 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
       return { survey, versions, links };
     });
     const { survey, versions, links } = setup;
+    const fileNames = new Map<string, string>();
     const columns = buildExportColumns(
       versions,
       survey.currentVersionId,
       links,
       query.layout,
       query.includeTest,
+      fileNames,
     );
     const filter: Filter = {
       from: query.from,
@@ -654,6 +733,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
       versionId: query.versionId,
       includeTest: query.includeTest,
       statuses: query.status === 'completed' ? ['completed'] : undefined,
+      excludeFlagged: query.excludeFlagged,
     };
 
     async function* rows(): AsyncGenerator<string> {
@@ -676,6 +756,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
             survey.id,
             found.map((r) => r.id),
           );
+          for (const f of await filesForResponses(tx, found.map((r) => r.id))) fileNames.set(f.id, f.filename);
           return { found, cells };
         });
         if (batch.found.length === 0) return;
@@ -713,6 +794,7 @@ interface RawResponse {
   device_type: string | null;
   distribution_id: string | null;
   hidden_fields: Record<string, string>;
+  quality_flags: string[];
 }
 
 interface ExportColumn {
@@ -726,6 +808,7 @@ export function buildExportColumns(
   links: { id: string; name: string; presetHiddenFields: Record<string, string> }[],
   layout: 'compact' | 'expanded',
   includeTest: boolean,
+  fileNames: Map<string, string> = new Map(),
 ): ExportColumn[] {
   const columns: ExportColumn[] = [
     { header: 'response_id', value: (r) => r.id },
@@ -739,6 +822,7 @@ export function buildExportColumns(
     { header: 'version', value: (_r, _a, v) => v?.versionNumber ?? '' },
     { header: 'distribution', value: (r) => links.find((l) => l.id === r.distribution_id)?.name ?? '' },
     { header: 'device_type', value: (r) => r.device_type ?? '' },
+    { header: 'quality_flags', value: (r) => [...r.quality_flags].sort().join(' ') },
   ];
   if (includeTest) columns.push({ header: 'is_test', value: (r) => (r.is_test ? 1 : 0) });
 
@@ -757,6 +841,53 @@ export function buildExportColumns(
     const header = (titleCounts.get(title) ?? 0) > 1 ? `${title} [${question.key}]` : title;
     const hasOther = 'options' in question && question.options.some((o) => o.isOther);
 
+    if (question.type === 'matrix') {
+      for (const row of question.rows) {
+        columns.push({
+          header: `${header} - ${row.label}`,
+          value: (_r, answers) => {
+            const value = answers.get(question.key) as Record<string, string | string[]> | undefined;
+            const cell = value?.[row.key];
+            if (cell === undefined) return '';
+            return (Array.isArray(cell) ? cell : [cell]).map((c) => question.options.find((o) => o.key === c)?.label ?? c).join('; ');
+          },
+        });
+      }
+      continue;
+    }
+    if (question.type === 'ranking') {
+      for (const option of question.options) {
+        columns.push({
+          header: `${header} - ${option.label} (rank)`,
+          value: (_r, answers) => {
+            const value = answers.get(question.key);
+            const rank = Array.isArray(value) ? value.indexOf(option.key) : -1;
+            return rank === -1 ? '' : rank + 1;
+          },
+        });
+      }
+      continue;
+    }
+    if (question.type === 'file_upload') {
+      columns.push({
+        header,
+        value: (_r, answers) => {
+          const value = answers.get(question.key);
+          return Array.isArray(value) ? value.map((id) => fileNames.get(id) ?? id).join('; ') : '';
+        },
+      });
+      continue;
+    }
+    if (question.type === 'slider' || question.type === 'consent') {
+      columns.push({
+        header,
+        value: (_r, answers) => {
+          const value = answers.get(question.key);
+          return value === undefined ? '' : question.type === 'consent' ? (value === true ? 'yes' : '') : value;
+        },
+      });
+      continue;
+    }
     if (question.type === 'multi_choice' && layout === 'expanded') {
       for (const option of question.options) {
         columns.push({

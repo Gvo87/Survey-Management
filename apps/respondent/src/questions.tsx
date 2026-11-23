@@ -5,7 +5,7 @@
  * - only native inputs (radio, checkbox, select, input), so keyboard and screen readers work by default
  * - required questions say so in text, not only with an asterisk
  */
-import { useMemo, type ReactNode } from 'react';
+import { lazy, Suspense, useMemo, type ReactNode } from 'react';
 import {
   orderOptions,
   otherText,
@@ -24,20 +24,20 @@ export interface QuestionProps {
   onChange: (value: AnswerValue | null) => void;
 }
 
-const ids = (key: string) => ({
+export const ids = (key: string) => ({
   field: `q-${key}`,
   help: `q-${key}-help`,
   error: `q-${key}-error`,
   extra: `q-${key}-extra`,
 });
 
-function describedBy(question: Question, error?: string, extra?: string): string | undefined {
+export function describedBy(question: Question, error?: string, extra?: string): string | undefined {
   const i = ids(question.key);
   const parts = [question.helpText ? i.help : null, extra ?? null, error ? i.error : null].filter(Boolean);
   return parts.length ? parts.join(' ') : undefined;
 }
 
-function TitleText({ question, number }: { question: Question; number: number }) {
+export function TitleText({ question, number }: { question: Question; number: number }) {
   return (
     <>
       <span className="q-number" aria-hidden="true">
@@ -57,7 +57,7 @@ function TitleText({ question, number }: { question: Question; number: number })
   );
 }
 
-function HelpAndError({ question, error }: { question: Question; error?: string }) {
+export function HelpAndError({ question, error }: { question: Question; error?: string }) {
   const i = ids(question.key);
   return (
     <>
@@ -77,7 +77,7 @@ function HelpAndError({ question, error }: { question: Question; error?: string 
 }
 
 /** Options grouped in a fieldset (radio / checkbox based questions). */
-function Group({
+export function Group({
   question,
   number,
   error,
@@ -109,7 +109,7 @@ function Group({
 }
 
 /** Single input with a <label>. */
-function Field({
+export function Field({
   question,
   number,
   error,
@@ -315,8 +315,9 @@ function TextQuestion({
   error,
   onChange,
 }: QuestionProps & { question: Extract<Question, { type: 'short_text' | 'long_text' | 'email' }> }) {
-  const text = typeof value === 'string' ? value : '';
+  const text = typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '';
   const max = question.type === 'email' ? 254 : question.config.maxLength;
+  const format = question.type === 'short_text' ? (question.config.format ?? 'text') : 'text';
   const counterId = ids(question.key).extra;
   const common = {
     id: `${ids(question.key).field}-input`,
@@ -341,12 +342,12 @@ function TextQuestion({
           {...common}
           className="text-input"
           type={question.type === 'email' ? 'email' : 'text'}
-          inputMode={question.type === 'email' ? 'email' : undefined}
+          inputMode={question.type === 'email' ? 'email' : format === 'integer' ? 'numeric' : format === 'number' ? 'decimal' : undefined}
           autoComplete={question.type === 'email' ? 'email' : 'off'}
           onChange={(e) => onChange(e.target.value)}
         />
       )}
-      {question.type !== 'email' ? (
+      {question.type !== 'email' && format === 'text' ? (
         <p className="q-counter" id={counterId}>
           {text.length} / {max} characters
         </p>
@@ -422,15 +423,16 @@ function DateQuestion({
   error,
   onChange,
 }: QuestionProps & { question: Extract<Question, { type: 'date' }> }) {
+  const mode = question.config.mode ?? 'date';
   return (
     <Field question={question} number={number} error={error}>
       <input
         id={`${ids(question.key).field}-input`}
         className="text-input date-input"
-        type="date"
+        type={mode === 'time' ? 'time' : mode === 'datetime' ? 'datetime-local' : 'date'}
         value={typeof value === 'string' ? value : ''}
-        min={question.config.minDate}
-        max={question.config.maxDate}
+        min={mode === 'time' ? question.config.minTime : mode === 'datetime' && question.config.minDate ? `${question.config.minDate}T00:00` : question.config.minDate}
+        max={mode === 'time' ? question.config.maxTime : mode === 'datetime' && question.config.maxDate ? `${question.config.maxDate}T23:59` : question.config.maxDate}
         required={question.required}
         aria-invalid={error ? true : undefined}
         aria-describedby={describedBy(question, error)}
@@ -440,9 +442,25 @@ function DateQuestion({
   );
 }
 
+// Phase 2A types live in their own chunk, fetched only by surveys that use them.
+const loadExtra = () => import('./questions-extra');
+const ExtraQuestion = lazy(loadExtra);
+export const preloadExtraQuestions = () => void loadExtra();
+
 export function QuestionView(props: QuestionProps) {
   const { question } = props;
   switch (question.type) {
+    case 'matrix':
+    case 'ranking':
+    case 'slider':
+    case 'phone':
+    case 'file_upload':
+    case 'consent':
+      return (
+        <Suspense fallback={<div className="question question-loading" aria-busy="true" />}>
+          <ExtraQuestion {...props} />
+        </Suspense>
+      );
     case 'single_choice':
       return <SingleChoice {...props} question={question} />;
     case 'multi_choice':

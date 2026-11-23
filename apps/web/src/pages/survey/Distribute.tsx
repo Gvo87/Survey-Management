@@ -127,25 +127,36 @@ function toLocalInput(iso: string | null): string {
 }
 
 function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: () => void }) {
+  const [opensAt, setOpensAt] = useState(toLocalInput(survey.access.opensAt));
   const [closesAt, setClosesAt] = useState(toLocalInput(survey.access.closesAt));
   const [quota, setQuota] = useState(survey.access.quota?.toString() ?? '');
   const [onePerBrowser, setOnePerBrowser] = useState(survey.access.onePerBrowser);
+  const [captcha, setCaptcha] = useState(survey.access.captcha);
   const [anonymous, setAnonymous] = useState(survey.anonymous);
+  // Write-only: '' keeps the current password; `null` removes it.
+  const [password, setPassword] = useState<string | null>('');
   const [message, setMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   useEffect(() => {
+    setOpensAt(toLocalInput(survey.access.opensAt));
     setClosesAt(toLocalInput(survey.access.closesAt));
     setQuota(survey.access.quota?.toString() ?? '');
     setOnePerBrowser(survey.access.onePerBrowser);
+    setCaptcha(survey.access.captcha);
     setAnonymous(survey.anonymous);
+    setPassword('');
   }, [survey]);
+  const passwordTooShort = typeof password === 'string' && password.length > 0 && password.length < 4;
 
   const save = useMutation({
     mutationFn: () =>
       patch<SurveyDetail>(`/surveys/${survey.id}`, {
         access: {
+          opensAt: opensAt ? new Date(opensAt).toISOString() : null,
           closesAt: closesAt ? new Date(closesAt).toISOString() : null,
           quota: quota ? Number(quota) : null,
           onePerBrowser,
+          captcha,
+          ...(password === null || password ? { password } : {}),
         },
         ...(anonymous !== survey.anonymous ? { anonymous } : {}),
       }),
@@ -198,9 +209,16 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
           onSubmit={(e) => {
             e.preventDefault();
             setMessage(null);
-            save.mutate();
+            if (!passwordTooShort) save.mutate();
           }}
         >
+          <TextField
+            label="Open on"
+            type="datetime-local"
+            value={opensAt}
+            onChange={(e) => setOpensAt(e.target.value)}
+            hint="Your local time. Before then, the link shows when the survey opens. Leave empty to open now."
+          />
           <TextField
             label="Close automatically on"
             type="datetime-local"
@@ -215,6 +233,46 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
             value={quota}
             onChange={(e) => setQuota(e.target.value)}
             hint={`Closes after this many completed responses. Currently ${formatNumber(survey.completedCount)}.`}
+          />
+          <fieldset className="flex flex-col gap-2">
+            <legend className="text-sm font-medium text-ink">Password</legend>
+            {survey.access.passwordEnabled && password === '' ? (
+              <p className="text-sm">
+                Respondents need a password to open this survey.{' '}
+                <Button size="sm" variant="ghost" onClick={() => setPassword(null)}>
+                  Remove password
+                </Button>
+              </p>
+            ) : null}
+            {password === null ? (
+              <p className="text-sm">
+                The password will be removed when you save.{' '}
+                <Button size="sm" variant="ghost" onClick={() => setPassword('')}>
+                  Undo
+                </Button>
+              </p>
+            ) : (
+              <TextField
+                label={survey.access.passwordEnabled ? 'New password' : 'Require a password (optional)'}
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                error={passwordTooShort ? 'Use at least 4 characters.' : undefined}
+                hint={
+                  survey.access.passwordEnabled
+                    ? 'Leave empty to keep the current password. Changing it signs out everyone who entered the old one.'
+                    : 'Share it with respondents separately. It is stored hashed, so it cannot be shown again.'
+                }
+              />
+            )}
+          </fieldset>
+          <Checkbox
+            label="Ask respondents to prove they're human (CAPTCHA)"
+            hint="Uses Cloudflare Turnstile, usually without a puzzle. Helps against bots on public links."
+            checked={captcha}
+            onChange={(e) => setCaptcha(e.target.checked)}
           />
           <Checkbox
             label="One response per browser"

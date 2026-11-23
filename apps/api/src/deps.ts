@@ -1,8 +1,11 @@
 import { Redis } from 'ioredis';
 import { createPool, type Pool } from '@survey/db';
 import type { Config } from './config';
+import { createTurnstileVerifier, fakeCaptcha, type CaptchaVerifier } from './infra/captcha';
 import { Jobs } from './infra/jobs';
 import { createMailer, type Mailer } from './infra/mailer';
+import { createClamAvScanner, disabledScanner, fakeScanner, type MalwareScanner } from './infra/scanner';
+import { createMemoryStorage, createS3Storage, type ObjectStorage } from './infra/storage';
 
 /** Everything the HTTP app and the worker need, created once per process. */
 export interface Deps {
@@ -11,6 +14,9 @@ export interface Deps {
   redis: Redis;
   jobs: Jobs;
   mailer: Mailer;
+  storage: ObjectStorage;
+  scanner: MalwareScanner;
+  captcha: CaptchaVerifier;
 }
 
 export async function createDeps(config: Config, opts: { worker: boolean }): Promise<Deps> {
@@ -19,7 +25,14 @@ export async function createDeps(config: Config, opts: { worker: boolean }): Pro
   redis.on('error', (error) => console.error('[redis]', error.message));
   const jobs = await Jobs.start(config.databaseUrl, opts);
   const mailer = createMailer(config.emailTransport, config.smtpUrl, config.emailFrom);
-  return { config, pool, redis, jobs, mailer };
+  const storage = config.storage === 'memory' ? createMemoryStorage() : createS3Storage(config.s3);
+  if (config.storage === 's3' && config.s3.createBucket) {
+    await storage.ensureBucket().catch((e: Error) => console.error('[storage] could not create bucket:', e.message));
+  }
+  const scanner =
+    config.scanner === 'clamav' ? createClamAvScanner(config.clamav.host, config.clamav.port) : config.scanner === 'fake' ? fakeScanner : disabledScanner;
+  const captcha = config.captcha === 'fake' ? fakeCaptcha : createTurnstileVerifier(config.turnstile.siteKey, config.turnstile.secretKey);
+  return { config, pool, redis, jobs, mailer, storage, scanner, captcha };
 }
 
 export async function closeDeps(deps: Deps): Promise<void> {

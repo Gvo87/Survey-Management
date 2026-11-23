@@ -633,3 +633,32 @@ The authoritative schema is `packages/db/migrations/0001_init.sql`. Differences 
   counts are right immediately.
 - **Anonymous surveys** store timestamps at hour precision. The exact start time lives only in Redis (30-day TTL,
   deleted on completion) so the duration can still be computed.
+
+## 2.12 Phase 2A additions (migration `0002_phase2a.sql`)
+
+| Table / column | Purpose |
+|---|---|
+| `themes` | Org themes: `tokens` (colours, font, radius), optional `logo_file_id`, one `is_default` per org. Not versioned: editing a theme restyles live surveys. |
+| `surveys.theme_id`, `is_template`, `template_description` | A survey's theme (null = org default) and org templates (surveys flagged as templates). |
+| `global_templates` | Platform templates (no org; readable by every org, written by super admins only). |
+| `question_bank_items` | Saved questions per org, stored with fresh keys and no display logic. |
+| `files` | Uploads and logos: storage key, name, real MIME type, size, SHA-256, `scan_status` (`pending`, `clean`, `infected`, `error`). A trigger refuses files for anonymous surveys. |
+| `responses.quality_flags` | `too_fast`, `straight_lined`, `malware`, with a GIN index for filtering. `status` gains `disqualified`. |
+| `surveys.access` (JSON) | Adds `opensAt`, `captcha` and `passwordHash` (argon2id; never returned by the API). |
+
+All new org tables have row-level security like the Phase 1 tables. `public_logo(file_id)` is a narrow
+`SECURITY DEFINER` function so the respondent app can fetch a clean logo without a tenant context.
+
+Answer cells for the new types (one row per cell, as in §2.6):
+
+| Type | Cells |
+|---|---|
+| matrix | one row per answered row: `sub_key` = row key, `value_choices` = chosen column(s) |
+| ranking | one row per ranked option: `sub_key` = option key, `value_number` = rank |
+| slider | `value_number` |
+| date (time / date-time) | `value_text` = the answer; `value_date` = its date part (date-time only) |
+| phone | `value_text` in E.164 |
+| file upload | `value_json` = file ids |
+| consent | `value_number` = 1, `value_text` = hash of the statement agreed to |
+
+Aggregation buckets now keep `sub_key`, so matrix rows and ranked options get their own counts.

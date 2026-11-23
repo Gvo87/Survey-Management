@@ -11,12 +11,17 @@
  *
  *   Password for every seeded account (development only): survey-demo-2026
  *
+ * Phase 2A: an Acme brand theme (org default), four global templates, a question-bank entry and a
+ * "Product research" survey that uses logic, matrix, ranking, slider, consent and phone questions.
+ *
  * `--large` also adds a 50,000-response survey to Acme for performance checks.
  */
 import { hash } from '@node-rs/argon2';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import {
+  bankQuestion,
+  checkCompletion,
   createDefinition,
   createOption,
   createQuestion,
@@ -35,8 +40,11 @@ import {
   answers as answersTable,
   auditLogs,
   distributions,
+  globalTemplates,
   memberships,
   organizations,
+  questionBankItems,
+  themes,
   responses,
   surveyCollaborators,
   surveys,
@@ -185,6 +193,39 @@ const onboardingSurvey = definition([
   },
 ]);
 
+// Phase 2A: logic and the new question types.
+const role = choice('single_choice', 'What best describes your role?', ['Product manager', 'Engineer', 'Designer', 'Student']);
+const tools = choice('multi_choice', 'Which parts of Acme do you use?', ['Web app', 'Mobile app', 'API']);
+if (tools.type === 'multi_choice') tools.options.push(createOption('None of these', { exclusive: true }));
+const consent = createQuestion('consent', 'Research consent');
+const satisfaction = createQuestion('matrix', 'How satisfied are you with…');
+if (satisfaction.type === 'matrix') satisfaction.rows = ['Speed', 'Reliability', 'Design', 'Documentation'].map((l) => createOption(l));
+const priorities = createQuestion('ranking', 'Rank what matters most to you');
+if (priorities.type === 'ranking') priorities.options = ['Price', 'Speed', 'Support', 'Integrations'].map((l) => createOption(l));
+const budgetBase = createQuestion('slider', 'Monthly tooling budget');
+const budget = budgetBase.type === 'slider' ? { ...budgetBase, config: { min: 0, max: 1000, step: 50, unit: '$', minLabel: 'None', maxLabel: '$1,000+' } } : budgetBase;
+const slowWhy = q(createQuestion('long_text', 'What makes Acme feel slow for you?'), {
+  visibleIf: { source: { question: satisfaction.key, sub: satisfaction.type === 'matrix' ? satisfaction.rows[0]!.key : '' }, op: 'eq', value: 'options' in satisfaction ? satisfaction.options[0]!.key : '' },
+});
+const phone = createQuestion('phone', 'Phone number, if we may call you');
+const optionKey = (question: Question, i: number) => ('options' in question ? question.options[i]!.key : '');
+const researchSurvey = definition(
+  [
+    { title: 'About you', elements: [role, tools, consent] },
+    { title: 'Your experience', elements: [satisfaction, priorities, budget] },
+    { title: 'Anything else, {{q.' + role.key + '|friend}}?', elements: [slowWhy, phone] },
+  ],
+  {
+    hiddenFields: [{ key: 'source', nonIdentifying: true }],
+    logic: [
+      { id: 'r_seedrule01', afterPage: 'p_seed0000', when: { source: { question: role.key }, op: 'eq', value: optionKey(role, 3) }, then: { disqualify: true } },
+      { id: 'r_seedrule02', afterPage: 'p_seed0000', when: { source: { question: tools.key }, op: 'contains_any', value: [optionKey(tools, 3)] }, then: { end: true } },
+    ],
+  },
+);
+researchSurvey.settings.thankYou = { title: 'Thanks, {{q.' + role.key + '|friend}}!', body: 'We read every answer.' };
+researchSurvey.settings.disqualified = { title: 'Thanks for your interest', body: 'This study is for working professionals, so we have all we need for now.' };
+
 // ── Answer generation ──────────────────────────────────────────────
 const COMMENTS = [
   'Great product, the reporting saves me hours every week.',
@@ -242,7 +283,34 @@ function answerFor(question: Question, mood: number): AnswerValue | null {
     case 'email':
       return random() < 0.3 ? `attendee${Math.floor(random() * 10000)}@example.com` : null;
     case 'date':
+      if (question.config.mode === 'time') return pick(['09:30', '13:00', '16:45']);
+      if (question.config.mode === 'datetime') return pick(['2026-10-14T09:30', '2026-10-15T13:00']);
       return pick(['2026-10-14', '2026-10-15']);
+    case 'matrix':
+      return Object.fromEntries(
+        question.rows.map((row) => {
+          const i = Math.max(0, Math.min(question.options.length - 1, Math.round(mood * 3 + (random() - 0.5) * 2)));
+          return [row.key, question.config.multiplePerRow ? [question.options[i]!.key] : question.options[i]!.key];
+        }),
+      );
+    case 'ranking': {
+      const keys = question.options.map((o) => o.key);
+      for (let i = keys.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        [keys[i], keys[j]] = [keys[j]!, keys[i]!];
+      }
+      return keys.slice(0, question.config.rankCount ?? keys.length);
+    }
+    case 'slider': {
+      const { min, max, step } = question.config;
+      return Math.min(max, min + Math.round((mood * (max - min) * random() * 1.6) / step) * step);
+    }
+    case 'consent':
+      return true;
+    case 'phone':
+      return random() < 0.3 ? `+1415555${String(Math.floor(random() * 10000)).padStart(4, '0')}` : null;
+    default:
+      return null;
   }
 }
 
@@ -404,11 +472,21 @@ async function seedSurvey(spec: SeedSurvey): Promise<string> {
         currentPageKey: partial ? def.pages[0]!.key : def.pages.at(-1)!.key,
         furthestPageKey: partial ? def.pages[0]!.key : def.pages.at(-1)!.key,
       });
-      if (!partial) completed++;
+      const hidden = responseRows.at(-1)!.hiddenFields!;
+      const raw: Record<string, AnswerValue> = {};
       for (const question of answered) {
         const value = answerFor(question, mood);
-        if (value === null) continue;
-        for (const cell of toCells(question, value))
+        if (value !== null) raw[question.key] = value;
+      }
+      // Run the real completion logic so seeded answers respect conditions and skip rules.
+      const result = partial ? null : checkCompletion(def, raw, hidden);
+      const values = result ? result.answers : raw;
+      if (result?.outcome === 'disqualified') responseRows.at(-1)!.status = 'disqualified';
+      else if (!partial) completed++;
+      for (const question of answered) {
+        const value = values[question.key];
+        if (value === undefined || value === null) continue;
+        for (const cell of toCells(question, value as AnswerValue))
           answerRows.push({ ...cell, valueJson: null, orgId: spec.orgId, surveyId, responseId: id });
       }
     }
@@ -508,6 +586,39 @@ await seedSurvey({
   versions: [npsSurvey],
   responses: 0,
 });
+await seedSurvey({
+  orgId: acme,
+  ownerId: acmeAdmin.id,
+  title: 'Product research – logic demo',
+  status: 'live',
+  versions: [researchSurvey],
+  responses: 300,
+  hidden: () => ({ source: pick(['newsletter', 'in-app', 'panel']) }),
+});
+
+// Phase 2A: an org default theme, global templates and a question-bank entry.
+await db.insert(themes).values({
+  id: newId(),
+  orgId: acme,
+  name: 'Acme brand',
+  tokens: { primary: '#0f6b5c', background: '#f3f7f6', surface: '#ffffff', text: '#14201d', font: 'humanist', radius: 'large' },
+  isDefault: true,
+  createdBy: acmeAdmin.id,
+});
+await db.insert(globalTemplates).values([
+  { id: newId(), name: 'Net Promoter Score', category: 'Customer', description: 'NPS with a follow-up reason, plan and usage questions.', definition: npsSurvey },
+  { id: newId(), name: 'Employee pulse', category: 'Employee', description: 'Short Likert check-in on tools, workload and recognition.', definition: pulseSurvey },
+  { id: newId(), name: 'Event feedback', category: 'Events', description: 'Overall rating, favourite session and suggestions.', definition: eventV2 },
+  { id: newId(), name: 'Product research', category: 'Research', description: 'Screener with skip logic, a satisfaction matrix, ranking and budget slider.', definition: researchSurvey },
+]);
+await db.insert(questionBankItems).values({
+  id: newId(),
+  orgId: acme,
+  question: bankQuestion(q(createQuestion('nps', 'How likely are you to recommend Acme to a friend or colleague?'), { required: true })),
+  tags: ['nps', 'standard'],
+  createdBy: acmeAdmin.id,
+});
+
 await seedSurvey({
   orgId: globex,
   ownerId: globexAdmin.id,

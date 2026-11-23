@@ -34,5 +34,24 @@ services:
       - '${SMTP_PORT:-1025}:1025'
       - '${MAILPIT_UI_PORT:-8025}:8025'
 
+  # S3-compatible object storage for uploads and logos (SeaweedFS; MinIO's images are no longer
+  # published). Local development only: no credentials are enforced.
+  s3:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data -volume.max=8
+    ports:
+      - '${S3_PORT:-8333}:8333'
+    volumes:
+      - s3data:/data
+
+  # Malware scanning for uploads. Heavy (about 1 GB of RAM, a few minutes to download signatures
+  # on first start), so it's opt-in: `docker compose --profile scan up -d` and MALWARE_SCANNER=clamav.
+  clamav:
+    image: clamav/clamav:stable
+    profiles: ['scan']
+    ports:
+      - '${CLAMAV_PORT:-3310}:3310'
+
 volumes:
   pgdata:
+  s3data:

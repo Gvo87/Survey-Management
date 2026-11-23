@@ -19,18 +19,38 @@ import { useSurvey } from './SurveyLayout';
 const STATUS_LABEL = {
   completed: 'Completed',
   in_progress: 'In progress',
-  disqualified: 'Disqualified',
+  disqualified: 'Screened out',
 } as const;
+
+const FLAG_LABEL: Record<string, { label: string; hint: string }> = {
+  too_fast: { label: 'Too fast', hint: 'Answered in under 1.5 seconds per question.' },
+  straight_lined: { label: 'Straight-lined', hint: 'Gave the same answer to every row of a matrix or a run of scale questions.' },
+  malware: { label: 'Malware', hint: 'An uploaded file contained malware and was quarantined.' },
+};
+
+function Flags({ flags }: { flags: string[] }) {
+  return (
+    <>
+      {flags.map((f) => (
+        <Badge key={f} className="ml-1 bg-amber-100 text-amber-900">
+          <span title={FLAG_LABEL[f]?.hint}>⚑ {FLAG_LABEL[f]?.label ?? f}</span>
+        </Badge>
+      ))}
+    </>
+  );
+}
 
 export function ResponsesPage() {
   const { survey } = useSurvey();
-  const [status, setStatus] = useState<'all' | 'completed' | 'in_progress'>('all');
+  const [status, setStatus] = useState<'all' | 'completed' | 'in_progress' | 'disqualified'>('all');
   const [includeTest, setIncludeTest] = useState(false);
+  const [flag, setFlag] = useState('');
   const query = useInfiniteQuery({
-    queryKey: ['responses', survey.id, status, includeTest],
+    queryKey: ['responses', survey.id, status, includeTest, flag],
     queryFn: ({ pageParam }) => {
       const p = new URLSearchParams({ status, limit: '50' });
       if (includeTest) p.set('includeTest', 'true');
+      if (flag) p.set('flag', flag);
       if (pageParam) p.set('cursor', pageParam);
       return get<PageResult<ResponseSummary>>(`/surveys/${survey.id}/responses?${p}`);
     },
@@ -51,6 +71,15 @@ export function ResponsesPage() {
           <option value="all">All responses</option>
           <option value="completed">Completed</option>
           <option value="in_progress">In progress</option>
+          <option value="disqualified">Screened out</option>
+        </SelectField>
+        <SelectField label="Quality" value={flag} onChange={(e) => setFlag(e.target.value)}>
+          <option value="">Any</option>
+          {Object.entries(FLAG_LABEL).map(([key, f]) => (
+            <option key={key} value={key}>
+              Flagged: {f.label.toLowerCase()}
+            </option>
+          ))}
         </SelectField>
         <Checkbox
           className="pb-2"
@@ -102,6 +131,7 @@ export function ResponsesPage() {
                   <td className="px-4 py-3">
                     {STATUS_LABEL[r.status]} {r.isTest ? <Badge>Test</Badge> : null}
                     <span className="ml-1 text-xs text-muted">v{r.versionNumber}</span>
+                    <Flags flags={r.qualityFlags} />
                   </td>
                   <td className="tabular px-4 py-3">{formatDuration(r.durationSec)}</td>
                   <td className="hidden px-4 py-3 text-muted md:table-cell">{r.distributionName ?? '-'}</td>
@@ -125,6 +155,28 @@ export function ResponsesPage() {
         </Button>
       ) : null}
     </div>
+  );
+}
+
+function FileLink({ file }: { file: ResponseDetail['files'][number] }) {
+  const size = file.size < 1024 * 1024 ? `${Math.max(1, Math.round(file.size / 1024))} KB` : `${(file.size / 1048576).toFixed(1)} MB`;
+  if (file.scanStatus === 'clean')
+    return (
+      <a className="text-brand-600 underline" href={`/api/v1/files/${file.id}`} download={file.filename}>
+        {file.filename} <span className="text-muted">({size})</span>
+      </a>
+    );
+  return (
+    <span>
+      {file.filename} <span className="text-muted">({size})</span>{' '}
+      {file.scanStatus === 'pending' ? (
+        <Badge>Checking for malware…</Badge>
+      ) : file.scanStatus === 'infected' ? (
+        <Badge className="bg-red-100 text-red-800">Quarantined: contains malware</Badge>
+      ) : (
+        <Badge className="bg-amber-100 text-amber-900">Couldn't be checked, so it can't be downloaded</Badge>
+      )}
+    </span>
   );
 }
 
@@ -170,12 +222,23 @@ export function ResponseDetailPage() {
           <Card title="Answers">
             {r.answers.length === 0 ? <p className="text-sm text-muted">No answers saved yet.</p> : null}
             <dl className="flex flex-col divide-y divide-line">
-              {r.answers.map((a) => (
-                <div key={a.questionKey} className="py-3">
-                  <dt className="text-sm font-medium">{a.title}</dt>
-                  <dd className="mt-1 whitespace-pre-wrap text-sm text-ink">{a.display}</dd>
-                </div>
-              ))}
+              {r.answers.map((a) => {
+                const files = r.files.filter((f) => f.questionKey === a.questionKey);
+                return (
+                  <div key={a.questionKey} className="py-3">
+                    <dt className="text-sm font-medium">{a.title}</dt>
+                    {files.length ? (
+                      <dd className="mt-1 flex flex-col gap-1 text-sm">
+                        {files.map((f) => (
+                          <FileLink key={f.id} file={f} />
+                        ))}
+                      </dd>
+                    ) : (
+                      <dd className="mt-1 whitespace-pre-wrap text-sm text-ink">{a.display}</dd>
+                    )}
+                  </div>
+                );
+              })}
             </dl>
           </Card>
           <div className="flex flex-col gap-4">
@@ -185,6 +248,18 @@ export function ResponseDetailPage() {
                 <dd>
                   {STATUS_LABEL[r.status]} {r.isTest ? <Badge>Test</Badge> : null}
                 </dd>
+                {r.qualityFlags.length ? (
+                  <>
+                    <dt className="text-muted">Quality</dt>
+                    <dd>
+                      {r.qualityFlags.map((f) => (
+                        <div key={f}>
+                          <strong>{FLAG_LABEL[f]?.label ?? f}</strong>: {FLAG_LABEL[f]?.hint}
+                        </div>
+                      ))}
+                    </dd>
+                  </>
+                ) : null}
                 <dt className="text-muted">Started</dt>
                 <dd>{formatDateTime(r.startedAt)}</dd>
                 <dt className="text-muted">Completed</dt>
