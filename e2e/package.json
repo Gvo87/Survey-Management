@@ -1,0 +1,17 @@
+{
+  "name": "@survey/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "lighthouse": "node lighthouse.mjs",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.54.0",
+    "@types/node": "^24.0.0",
+    "chrome-launcher": "^1.2.3",
+    "lighthouse": "^12.8.2"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+.vite/
+.turbo/
+playwright-report/
+test-results/
+e2e/.auth/
+.lighthouseci/
+perf/tmp/

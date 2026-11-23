@@ -1,0 +1,23 @@
+{
+  "name": "@survey/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Survey definition schema, logic engine and answer validation. Pure TypeScript, no I/O. Shared by builder, respondent app and API.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "fast-check": "^4.2.0",
+    "vitest": "^3.2.0"
+  }
+}

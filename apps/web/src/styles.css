@@ -1,0 +1,47 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --color-brand-50: #eef3fd;
+  --color-brand-100: #dce6fb;
+  --color-brand-500: #2a5bd7;
+  --color-brand-600: #2445a8;
+  --color-brand-700: #1c3787;
+  --color-ink: #1b1f24;
+  --color-muted: #59616d;
+  --color-line: #dde1e6;
+  --color-canvas: #f6f7f9;
+}
+
+/* Chart tokens (validated with the dataviz palette validator; light theme only in Phase 1). */
+:root {
+  --chart-surface: #fcfcfb;
+  --chart-series-1: #2a78d6;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --chart-text: #0b0b0b;
+  --chart-text-2: #52514e;
+  --chart-muted: #898781;
+  --chart-neg-2: #c23a39;
+  --chart-neg-1: #ee8584;
+  --chart-neutral: #e1e0d9;
+  --chart-pos-1: #6da7ec;
+  --chart-pos-2: #1c5cab;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+:focus-visible {
+  outline: 3px solid #f2a900;
+  outline-offset: 2px;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

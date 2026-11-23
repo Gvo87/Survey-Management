@@ -1,0 +1,17 @@
+{
+  "name": "@survey/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "API request schemas (Zod) and response types shared by the API and both frontends.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@survey/core": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

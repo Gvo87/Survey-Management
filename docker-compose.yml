@@ -1,0 +1,38 @@
+name: survey-management
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: survey
+      POSTGRES_PASSWORD: survey
+      POSTGRES_DB: survey
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U survey -d survey']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - '${SMTP_PORT:-1025}:1025'
+      - '${MAILPIT_UI_PORT:-8025}:8025'
+
+volumes:
+  pgdata:

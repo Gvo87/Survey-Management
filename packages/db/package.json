@@ -1,0 +1,31 @@
+{
+  "name": "@survey/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Database schema, SQL migrations (including RLS), tenant-scoped transactions and seed data.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./dev": "./src/dev-credentials.ts"
+  },
+  "scripts": {
+    "migrate": "tsx src/cli/migrate.ts",
+    "seed": "tsx src/cli/seed.ts",
+    "seed:large": "tsx src/cli/seed.ts --large",
+    "reset": "tsx src/cli/reset.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@survey/core": "workspace:*",
+    "drizzle-orm": "^0.44.0",
+    "pg": "^8.16.0",
+    "pg-boss": "^10.3.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@node-rs/argon2": "^2.0.2",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "tsx": "^4.20.0"
+  }
+}

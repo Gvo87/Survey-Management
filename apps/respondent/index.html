@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#ffffff" />
+    <title>Survey</title>
+    <script>
+      // Start loading the survey in parallel with the JavaScript bundle (saves one round trip on 4G).
+      (function () {
+        var m = location.pathname.match(/^\/s\/([A-Za-z0-9]{6,20})\/?$/);
+        if (!m) return;
+        var key = null;
+        try {
+          var saved = JSON.parse(localStorage.getItem('sm:' + m[1]) || 'null');
+          key = saved && saved.key;
+        } catch (e) {}
+        var d = new URLSearchParams(location.search).get('d');
+        window.__surveyPrefetch = fetch('/r/v1/s/' + m[1] + (d ? '?d=' + encodeURIComponent(d) : ''), {
+          headers: key ? { 'X-Response-Key': key } : {},
+        }).then(function (r) {
+          return r.json().then(function (body) {
+            return { status: r.status, body: body, key: key };
+          });
+        });
+        window.__surveyPrefetch.catch(function () {});
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>This survey needs JavaScript to run.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

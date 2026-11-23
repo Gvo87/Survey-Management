@@ -1,0 +1,25 @@
+{
+  "name": "@survey/respondent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json",
+    "size": "vite build && node scripts/check-size.mjs"
+  },
+  "dependencies": {
+    "@survey/core": "workspace:*",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@survey/contracts": "workspace:*",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "vite": "^7.0.0"
+  }
+}

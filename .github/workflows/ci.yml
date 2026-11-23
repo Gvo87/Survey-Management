@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: survey
+          POSTGRES_PASSWORD: survey
+          POSTGRES_DB: survey
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U survey" --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+      mailpit:
+        image: axllent/mailpit:latest
+        ports: ['1025:1025']
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: cp .env.example .env
+      - name: Create the application role and test database
+        run: |
+          PGPASSWORD=survey psql -h localhost -U survey -d survey -f docker/postgres/init.sql
+      - run: pnpm db:migrate
+      - run: pnpm verify
+      - name: Production builds
+        run: pnpm build
+      - name: End-to-end tests
+        run: |
+          pnpm --filter @survey/e2e exec playwright install --with-deps chromium
+          pnpm test:e2e
+      - name: Respondent performance budget (Lighthouse, LCP < 2 s)
+        run: |
+          (pnpm --filter @survey/api dev &) && npx --yes wait-on http://localhost:3000/readyz
+          pnpm --filter @survey/e2e lighthouse
+      - name: Analytics performance (50k responses)
+        run: |
+          pnpm db:seed:large
+          pnpm perf:results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports
+          path: |
+            e2e/playwright-report
+            perf

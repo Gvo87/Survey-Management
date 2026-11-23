@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "--filter", "@survey/api", "dev"],
+      "port": 3000,
+      "url": "http://localhost:3000"
+    },
+    {
+      "name": "respondent",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "--filter", "@survey/respondent", "dev"],
+      "port": 5174
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "--filter", "@survey/web", "dev"],
+      "port": 5173
+    }
+  ]
+}
