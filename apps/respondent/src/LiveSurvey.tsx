@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { RespondentSurvey } from '@survey/contracts';
 import { firstPageKey, type AnswerValue, type SurveyDefinition } from '@survey/core';
-import { ApiError, completeResponse, emailResumeLink, loadSurvey, removeFile, saveResponse, unlock, uploadFile } from './api';
+import { ApiError, completeResponse, emailResumeLink, loadSurvey, readMemberResponseKey, removeFile, saveResponse, signIn, unlock, uploadFile } from './api';
 import { Loading, MessagePage, Paragraphs } from './Pages';
 import { Runner, type CompleteOutcome } from './Runner';
 import { clearState, isDone, markDone, newResponseKey, readState, writeState, type LocalState } from './storage';
@@ -31,6 +31,7 @@ type Phase =
   | { kind: 'already_campaign' }
   | { kind: 'not_found' }
   | { kind: 'reload' }
+  | { kind: 'login'; title: string; loginUrl: string; expired: boolean }
   | { kind: 'error'; message: string };
 
 const backoff = (attempt: number) => Math.min(30_000, 1000 * 2 ** attempt) * (0.75 + Math.random() * 0.5);
@@ -53,25 +54,43 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
   const load = useCallback(async () => {
     setPhase({ kind: 'loading' });
     let local = readState(publicId);
+    // Phase 3B: back from signing in on the admin app (#rt=…, one-time). The member's response key is the
+    // same on every device, so it replaces any other response this browser started.
+    const handoff = /^#rt=([A-Za-z0-9_.-]{20,1000})$/.exec(location.hash)?.[1] ?? null;
+    let loginExpired = false;
+    if (handoff) {
+      history.replaceState(null, '', location.pathname + location.search);
+      try {
+        await signIn(publicId, handoff);
+      } catch {
+        loginExpired = true;
+      }
+    }
+    const memberKey = readMemberResponseKey(publicId);
+    if (memberKey && local?.key !== memberKey) local = null;
     // A personal campaign link (?t=) or an emailed resume link (#k=) decide which response this is.
     const recipientToken = /^[A-Za-z0-9_-]{32}$/.test(params.get('t') ?? '') ? params.get('t') : null;
     const fragmentKey = /^#k=([A-Za-z0-9_-]{22,128})$/.exec(location.hash)?.[1] ?? null;
     if (fragmentKey) history.replaceState(null, '', location.pathname + location.search);
     if (fragmentKey && local?.key !== fragmentKey) local = null;
-    let key = fragmentKey ?? recipientToken ?? local?.key ?? null;
+    let key = memberKey ?? fragmentKey ?? recipientToken ?? local?.key ?? null;
     let data: RespondentSurvey;
+    const lang = params.get('lang');
     try {
-      data = await loadSurvey(publicId, key, params.get('d'), recipientToken);
+      data = await loadSurvey(publicId, key, params.get('d'), recipientToken, lang);
       // Anonymous surveys never use the personal token as the response key: look up this browser's own.
       if (data.survey.anonymous && recipientToken && !fragmentKey && local && key !== local.key) {
         key = local.key;
-        data = await loadSurvey(publicId, key, params.get('d'), recipientToken);
+        data = await loadSurvey(publicId, key, params.get('d'), recipientToken, lang);
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return setPhase({ kind: 'not_found' });
       return setPhase({ kind: 'error', message: "We couldn't load this survey. Check your connection and try again." });
     }
     document.title = data.survey.title;
+    // Phase 3B: the served language, mirrored for right-to-left scripts.
+    document.documentElement.lang = data.language.locale;
+    document.documentElement.dir = data.language.dir;
     applyTheme(data.theme?.tokens ?? null);
     if (data.resume?.status === 'completed' || data.resume?.status === 'disqualified') {
       clearState(publicId);
@@ -83,13 +102,14 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
       return setPhase({ kind: 'already_campaign' });
     }
     if (data.access.state === 'password_required') return setPhase({ kind: 'locked', title: data.survey.title });
+    if (data.access.state === 'login_required')
+      return setPhase({ kind: 'login', title: data.survey.title, loginUrl: data.access.loginUrl, expired: loginExpired });
     if (data.access.state === 'not_yet_open') return setPhase({ kind: 'not_yet_open', opensAt: data.access.opensAt });
     if (data.access.state !== 'open' || !data.version)
       return setPhase({ kind: 'closed', message: data.access.state === 'closed' ? data.access.message : 'This survey is closed.' });
     if (!data.resume && data.survey.onePerBrowser && isDone(publicId)) return setPhase({ kind: 'already' });
 
     const definition = data.version.definition;
-    document.documentElement.lang = definition.defaultLocale;
     // Local state from an older version the server never saw: start over on the current one.
     if (local && local.versionId !== data.version.id && !data.resume) local = null;
     // Non-anonymous campaign links: the personal token is the response key, so the same link resumes on any device.
@@ -103,7 +123,7 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
       }
       const hiddenFields = effectiveHiddenFields(definition, data.survey.anonymous, fromUrl, data.presetHiddenFields);
       local = {
-        key: preferredKey ?? newResponseKey(),
+        key: memberKey ?? preferredKey ?? newResponseKey(),
         versionId: data.version.id,
         seq: 0,
         ackedSeq: 0,
@@ -115,7 +135,7 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
           ...(params.get('test') ? { testToken: params.get('test')! } : {}),
           ...(recipientToken ? { recipientToken } : {}),
           hiddenFields,
-          locale: (navigator.language || 'en').slice(0, 10),
+          locale: data.language.locale,
         },
       };
     }
@@ -144,11 +164,35 @@ export function LiveSurvey({ publicId }: { publicId: string }) {
     case 'loading':
       return <Loading />;
     case 'running':
-      return <RunningSurvey publicId={publicId} phase={phase} onPhase={setPhase} />;
+      return (
+        <RunningSurvey
+          publicId={publicId}
+          phase={phase}
+          onPhase={setPhase}
+          onReload={() => void load()}
+          onLanguage={(locale) => {
+            // Answers are kept (they're keyed, not worded): only the text changes.
+            params.set('lang', locale);
+            history.replaceState(null, '', `${location.pathname}?${params}${location.hash}`);
+            void load();
+          }}
+        />
+      );
     case 'thanks':
       return <ThankYou {...phase} />;
     case 'locked':
       return <PasswordGate publicId={publicId} title={phase.title} onUnlocked={() => void load()} />;
+    case 'login':
+      return (
+        <MessagePage title={phase.title}>
+          <p>{phase.expired ? 'That sign-in link has expired. Sign in again to continue.' : 'This survey is for members of the organization that runs it. Sign in to answer.'}</p>
+          <p>
+            <a className="button primary" href={phase.loginUrl} target={document.documentElement.dataset.embed ? '_blank' : undefined} rel="noopener">
+              Sign in to continue
+            </a>
+          </p>
+        </MessagePage>
+      );
     case 'not_yet_open':
       return (
         <MessagePage title="This survey isn't open yet">
@@ -344,14 +388,43 @@ function PasswordGate({ publicId, title, onUnlocked }: { publicId: string; title
   );
 }
 
+/** Phase 3B: shown when the survey has more than one language. Names come from the browser (Intl). */
+function LanguagePicker({ survey, onPick }: { survey: RespondentSurvey; onPick: (locale: string) => void }) {
+  const { available, locale, ui } = survey.language;
+  if (available.length < 2) return null;
+  const name = (code: string) => {
+    try {
+      return new Intl.DisplayNames([code], { type: 'language' }).of(code) ?? code;
+    } catch {
+      return code;
+    }
+  };
+  return (
+    <div className="language-picker">
+      <label htmlFor="survey-language">{ui.language}</label>
+      <select id="survey-language" className="select-input" value={locale} onChange={(e) => onPick(e.target.value)}>
+        {available.map((code) => (
+          <option key={code} value={code} lang={code}>
+            {name(code)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function RunningSurvey({
   publicId,
   phase,
   onPhase,
+  onReload,
+  onLanguage,
 }: {
   publicId: string;
   phase: Extract<Phase, { kind: 'running' }>;
   onPhase: (phase: Phase) => void;
+  onReload: () => void;
+  onLanguage: (locale: string) => void;
 }) {
   const state = useRef<LocalState>(phase.state);
   const [offline, setOffline] = useState(false);
@@ -385,6 +458,7 @@ function RunningSurvey({
     },
     answers: state.current.answers,
     currentPageKey: state.current.pageKey,
+    locale: phase.survey.language.locale,
   });
 
   const acknowledged = (seq: number) => {
@@ -418,6 +492,7 @@ function RunningSurvey({
           return;
         }
         if (code === 'password_required') return onPhase({ kind: 'locked', title: phase.survey.survey.title });
+        if (code === 'login_required') return void onReload();
         if (error.status === 410) return onPhase({ kind: 'closed', message: error.problem?.title ?? 'This survey is closed.' });
         return; // validation problems surface on submit
       }
@@ -562,6 +637,8 @@ function RunningSurvey({
         onChange={onChange}
         onPageComplete={onPageComplete}
         onSubmit={onSubmit}
+        ui={phase.survey.language.ui}
+        headerExtra={<LanguagePicker survey={phase.survey} onPick={onLanguage} />}
         beforeNav={needsCaptcha && siteKey ? <Turnstile siteKey={siteKey} resetKey={captchaReset} onToken={setCaptchaToken} /> : null}
         status={status ? <p role="status">{status}</p> : null}
       />

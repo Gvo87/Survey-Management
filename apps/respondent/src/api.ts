@@ -1,6 +1,7 @@
 import type {
   CompleteResult,
   Problem,
+  RespondentLoginResult,
   RespondentSurvey,
   SaveResponseRequest,
   SaveResponseResult,
@@ -42,12 +43,39 @@ function writeAccessToken(publicId: string, token: string): void {
   }
 }
 
+// ── Phase 3B: signed-in members (login-required surveys), for this browser session only ───
+// The respondent token and the member's response key (the same on every device).
+type Member = { token: string; responseKey: string };
+const memberKey = (publicId: string) => `sm:member:${publicId}`;
+const members = new Map<string, Member>();
+function readMember(publicId: string): Member | null {
+  const inMemory = members.get(publicId);
+  if (inMemory) return inMemory;
+  try {
+    return JSON.parse(sessionStorage.getItem(memberKey(publicId)) ?? 'null') as Member | null;
+  } catch {
+    return null;
+  }
+}
+export const readRespondentToken = (publicId: string) => readMember(publicId)?.token ?? null;
+export const readMemberResponseKey = (publicId: string) => readMember(publicId)?.responseKey ?? null;
+function writeMember(publicId: string, member: Member): void {
+  members.set(publicId, member);
+  try {
+    sessionStorage.setItem(memberKey(publicId), JSON.stringify(member));
+  } catch {
+    // blocked storage: the in-memory copy lasts for this page
+  }
+}
+
 function headers(publicId: string, key: string | null, json: boolean): Record<string, string> {
   const token = readAccessToken(publicId);
+  const member = readRespondentToken(publicId);
   return {
     ...(json ? { 'Content-Type': 'application/json' } : {}),
     ...(key ? { 'X-Response-Key': key } : {}),
     ...(token ? { 'X-Access-Token': token } : {}),
+    ...(member ? { 'X-Respondent-Token': member } : {}),
   };
 }
 
@@ -85,11 +113,12 @@ export async function loadSurvey(
   key: string | null,
   distribution: string | null,
   recipientToken: string | null = null,
+  lang: string | null = null,
 ): Promise<RespondentSurvey> {
   // Reuse the request index.html started before the bundle loaded, if it matches.
   const prefetch = window.__surveyPrefetch;
   window.__surveyPrefetch = undefined;
-  if (prefetch && !readAccessToken(publicId) && !recipientToken) {
+  if (prefetch && !readAccessToken(publicId) && !readRespondentToken(publicId) && !recipientToken) {
     try {
       const result = await prefetch;
       if (result.key === key) {
@@ -103,6 +132,7 @@ export async function loadSurvey(
   const params = new URLSearchParams();
   if (distribution) params.set('d', distribution);
   if (recipientToken) params.set('t', recipientToken);
+  if (lang) params.set('lang', lang);
   const query = params.toString() ? `?${params}` : '';
   return request<RespondentSurvey>(publicId, 'GET', `/r/v1/s/${publicId}${query}`, key);
 }
@@ -114,6 +144,13 @@ export const getUnsubscribe = (token: string) =>
   request<{ orgName: string; email: string; unsubscribed: boolean }>('', 'GET', `/r/v1/unsubscribe/${token}`, null);
 
 export const postUnsubscribe = (token: string) => request<{ unsubscribed: boolean }>('', 'POST', `/r/v1/unsubscribe/${token}`, null, {});
+
+/** Exchange the one-time token the admin app handed over for a respondent token (members only). */
+export async function signIn(publicId: string, token: string): Promise<RespondentLoginResult> {
+  const result = await request<RespondentLoginResult>(publicId, 'POST', `/r/v1/s/${publicId}/login`, null, { token });
+  writeMember(publicId, { token: result.respondentToken, responseKey: result.responseKey });
+  return result;
+}
 
 export async function unlock(publicId: string, password: string): Promise<void> {
   const { accessToken } = await request<UnlockResult>(publicId, 'POST', `/r/v1/s/${publicId}/unlock`, null, { password });

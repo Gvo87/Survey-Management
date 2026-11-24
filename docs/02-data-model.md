@@ -682,3 +682,30 @@ Aggregation buckets now keep `sub_key`, so matrix rows and ranked options get th
 narrow `SECURITY DEFINER` functions: `resolve_recipient` (personal link → org, survey, recipient),
 `record_email_suppression`, `due_scheduled_reports`, `campaigns_needing_reminders` and `expired_exports` (the
 worker's cross-org scans, which then switch into each org's tenant context).
+
+## 2.14 Phase 3B additions (migration `0005_phase3b.sql`)
+
+| Table / column | Purpose |
+|---|---|
+| `survey_versions.translations` | Existing column (from 0001), now used: `{ locale: { textKey: string } }`. Editable on published versions (the immutability trigger only guards the definition and structure). |
+| `surveys.access.requireLogin` | Login-required survey (JSON flag, like the other access settings). |
+| `responses.respondent_user_id` | Existing column, now used and a foreign key to `users` (`on delete set null`). A unique index `(survey_id, respondent_user_id)` allows one response per member. The 0001 trigger still refuses it on anonymous surveys. |
+| `surveys.retention_days` | Per-survey retention (1–3650 days; null uses `organizations.settings.retention.responsesDays`). |
+| `sso_connections` | `protocol` (`oidc`, `saml`), `config_enc` (AES-256-GCM JSON: issuer, client id and secret, or entry point, IdP entity ID and certificate), non-secret `summary`, `default_role` (creator or analyst), `enabled`, `last_login_at` (enforcement needs one successful login). |
+| `sso_domains` | `(org_id, domain)` with a TXT `verification_token` and `verified_at`. Any org may claim a domain; a partial unique index lets only one verify it. |
+| `sso_identities` | `(connection_id, subject)` → `user_id`: the identity provider's stable subject. |
+| `text_insights` | One AI summary: question, status, provider and model, answers analysed and in total, summary, `themes` (label, summary, sentiment, count, response ids), sentiment counts, tokens, `generated_at`. |
+| `org_usage_monthly` | `(org_id, month)`: responses, published versions, campaign emails, AI tokens. Incremented where the event happens (the aggregation job, publishing, the send job, the AI job); backfilled from existing data by the migration. Purges never lower it. |
+| `privacy_requests` | `kind` (`export`, `erase`), `subject_email`, status, `result` (counts), the export file (7 days), requester. |
+| `organizations.settings` | Gains `retention.responsesDays`, `ai.enabled`, `ai.monthlyTokenCap` (set by super admins) and `sso.enforced`. |
+
+All new org tables have row-level security. New narrow `SECURITY DEFINER` functions: `sso_for_domain` (login page:
+the org that verified a domain, whether it enforces SSO, its connections), `sso_connection_org` (starting a login),
+`retention_targets`, `deleted_surveys_due` and `expired_privacy_exports` (the worker's nightly scans), and
+`admin_org_overview` (the super-admin console: sizes and usage, no content). `resolve_public_survey` now ignores
+suspended orgs.
+
+**Retention purge** (nightly, `retention.purge`): responses whose `completed_at` (or `last_activity_at`, if never
+completed) is older than the survey's period are deleted in batches of 5,000 with their answers, files, tags and
+notes; aggregates and `completed_count` are rebuilt in the same transaction, and one audit entry per survey records the
+count. Soft-deleted surveys are deleted for good 30 days after deletion, with their stored files.

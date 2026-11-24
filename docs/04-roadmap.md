@@ -20,8 +20,8 @@ flowchart LR
 and can be swapped if email distribution matters more to you than logic.
 
 **Phase 3 is split the same way (2026-11-23).** 3A is collaboration and the platform API. 3B covers languages,
-identity, AI and governance. 3A needs no answer to an open question. Q5 (login-required respondents) and Q10 (AI
-provider) only affect 3B.
+identity, AI and governance. 3A needed no answer to an open question. Q5 (login-required respondents: org members
+only) and Q10 (AI provider: OpenAI, opt-in per org) were answered on 2026-11-24 for 3B.
 
 ### Where unassigned items went
 
@@ -39,7 +39,7 @@ The brief assigned some items to phases. I placed the rest here.
 | Embed widget, tags/notes, XLSX/PDF, scheduled reports | 2B | Distribution and analysis features. |
 | Folders, teams, comments, approvals, notifications | 3 | Collaboration, per the brief. |
 | Retention, bulk delete, usage, DSAR, super admin console | 3 | Administration. |
-| Login-required respondents | 3 | Depends on open question Q5. |
+| Login-required respondents | 3B | Q5: org members only (login or SSO). |
 | Production infrastructure as code | open | Open question Q4. |
 
 ## 4.2 Phase 1: MVP
@@ -296,11 +296,16 @@ API keys and webhooks, multi-language, SSO, AI summaries.
   - language picker plus browser detection
   - missing-translation checks
   - right-to-left support (see risks)
-- **AI summaries of open text:** themes and sentiment, opt-in per org, labelled, with cost caps. Pending Q10 (provider).
-- **SSO:** SAML and OIDC, just-in-time provisioning, optional SSO enforcement.
+- **AI summaries of open text:** themes and sentiment, opt-in per org, labelled, with cost caps. Q10: OpenAI behind a
+  provider interface (a deterministic fake in tests); response text goes to OpenAI as a third-party processor.
+- **SSO:** SAML and OIDC, just-in-time provisioning, optional SSO enforcement. Self-hosted (openid-client,
+  node-saml), with email domains verified by DNS TXT record.
 - **Administration:** retention policies and purge, usage metrics, super admin console. (Bulk delete shipped in 2B.)
 - **Privacy:** subject export and erasure (GDPR/CCPA).
-- **Login-required respondents:** pending Q5.
+- **Login-required respondents:** Q5: members of the survey's org only, one response each; a signed handoff token
+  carries the login from the admin app to the respondent app.
+
+Built in one pass (about the size of 3A and 2B). Status and evidence: [phase-3b-status.md](phase-3b-status.md).
 
 **Acceptance criteria**
 - [ ] A survey translated into 2 languages serves each by `lang` param and by browser detection. Logic and piping work in every language. Publish warns about missing strings. A right-to-left language renders mirrored.
@@ -311,10 +316,11 @@ API keys and webhooks, multi-language, SSO, AI summaries.
   - links each theme to sample responses
   - respects a per-org monthly token cap
   - redacts emails and phone numbers before sending
-- [ ] SAML (tested with Okta or Entra ID) and OIDC (tested with Google) logins work with just-in-time provisioning. Enforced SSO blocks password login for that org's domains.
+- [ ] SAML (tested with Okta or Entra ID) and OIDC (tested with Google) logins work with just-in-time provisioning. Enforced SSO blocks password login for that org's domains. *(Tested against local mock identity providers; a check against real Okta, Entra ID or Google needs accounts there.)*
 - [ ] A retention policy purges responses older than N days on schedule, repairs aggregates and writes an audit entry.
 - [ ] Usage metrics per org are visible to org admins and super admins.
 - [ ] A subject export request produces a file of every non-anonymous record for an email. Erasure removes them and is audit-logged. Anonymous responses are, correctly, out of scope.
+- [ ] Login-required respondents (Q5): only signed-in members of the survey's org can answer, once each; anonymous surveys can't require login.
 
 ## 4.7 Definition of done (every phase)
 

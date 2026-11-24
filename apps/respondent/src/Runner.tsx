@@ -19,13 +19,17 @@ import {
   QUESTION_TYPE_META,
   validatePage,
   visibleElements,
+  format,
+  UI_STRINGS,
   type AnswerValue,
   type FieldError,
   type Question,
   type SurveyDefinition,
+  type UiStrings,
 } from '@survey/core';
 import { preloadExtraQuestions, QuestionView } from './questions';
 import { Paragraphs } from './Pages';
+import { UiContext } from './ui';
 
 export type CompleteOutcome = { ok: true } | { ok: false; errors: FieldError[] };
 
@@ -54,10 +58,15 @@ export interface RunnerProps {
   onChange?: (answers: Record<string, AnswerValue>, pageKey: string, history: string[]) => void;
   onPageComplete?: (answers: Record<string, AnswerValue>, pageKey: string) => void;
   onSubmit: (answers: Record<string, AnswerValue>) => Promise<CompleteOutcome>;
+  /** Phase 3B: buttons and messages in the survey's language (English by default). */
+  ui?: UiStrings;
+  /** Phase 3B: shown in the header (the language picker). */
+  headerExtra?: ReactNode;
 }
 
 export function Runner(props: RunnerProps) {
   const { definition, hidden } = props;
+  const ui = props.ui ?? UI_STRINGS;
   const [answers, setAnswers] = useState<Record<string, AnswerValue>>(props.initialAnswers ?? {});
   const [pageKey, setPageKey] = useState(props.initialPageKey ?? firstPageKey(definition, { answers: {}, hidden }));
   const [history, setHistory] = useState<string[]>(props.initialHistory ?? []);
@@ -120,9 +129,10 @@ export function Runner(props: RunnerProps) {
   };
 
   const showErrors = (list: FieldError[]) => {
-    const map = Object.fromEntries(list.map((e) => [e.questionKey, e.message]));
+    // "Required" is the common case and is translatable; other messages come from @survey/core in English.
+    const map = Object.fromEntries(list.map((e) => [e.questionKey, e.code === 'required' && e.message === UI_STRINGS.requiredError ? ui.requiredError : e.message]));
     setErrors(map);
-    setAnnouncement(`${list.length} ${list.length === 1 ? 'question needs' : 'questions need'} your attention.`);
+    setAnnouncement(`${ui.errorSummary} ${list.length}`);
     focusTarget.current = 'error';
   };
 
@@ -131,7 +141,7 @@ export function Runner(props: RunnerProps) {
     setHistory(newHistory);
     setErrors({});
     const p = progress(definition, key);
-    setAnnouncement(`Page ${p.index + 1} of ${p.total}`);
+    setAnnouncement(format(ui.pageOf, { n: p.index + 1, total: p.total }));
     focusTarget.current = 'heading';
     props.onChange?.(answers, key, newHistory);
   };
@@ -165,19 +175,22 @@ export function Runner(props: RunnerProps) {
   };
 
   const errorList = Object.entries(errors);
-  const pageTitle = page.title?.trim() ? piped(page.title) : total > 1 ? `Page ${index + 1} of ${total}` : '';
+  const pageOf = format(ui.pageOf, { n: index + 1, total });
+  const pageTitle = page.title?.trim() ? piped(page.title) : total > 1 ? pageOf : '';
   const pipedQuestion = (q: Question): Question =>
     q.title.includes('{{') || q.helpText?.includes('{{')
       ? { ...q, title: piped(q.title), ...(q.helpText ? { helpText: piped(q.helpText) } : {}) }
       : q;
 
   return (
+    <UiContext.Provider value={ui}>
     <main className="survey">
       {props.banner}
       <header className="survey-header">
+        {props.headerExtra}
         {props.logoUrl ? <img className="survey-logo" src={props.logoUrl} alt="" /> : null}
         <h1 className="survey-title">{props.title}</h1>
-        {props.anonymous ? <p className="anonymous-note">This survey is anonymous. Your answers aren't linked to you.</p> : null}
+        {props.anonymous ? <p className="anonymous-note">{ui.anonymousNote}</p> : null}
         {definition.settings.showProgressBar && total > 1 ? (
           <div className="progress">
             <div
@@ -187,13 +200,11 @@ export function Runner(props: RunnerProps) {
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={percent}
-              aria-valuetext={`Page ${index + 1} of ${total}`}
+              aria-valuetext={pageOf}
             >
               <div className="progress-fill" style={{ width: `${Math.max(percent, 4)}%` }} />
             </div>
-            <span className="progress-text">
-              Page {index + 1} of {total}
-            </span>
+            <span className="progress-text">{pageOf}</span>
           </div>
         ) : null}
       </header>
@@ -207,13 +218,13 @@ export function Runner(props: RunnerProps) {
         {errorList.length > 0 ? (
           <div className="error-summary" role="alert">
             <p>
-              <strong>Please check {errorList.length === 1 ? 'this answer' : `these ${errorList.length} answers`}:</strong>
+              <strong>{ui.errorSummary}</strong>
             </p>
             <ul>
               {errorList.map(([key, message]) => (
                 <li key={key}>
                   <a href={`#q-${key}`}>
-                    Question {questionNumbers.get(key)}: {message}
+                    {questionNumbers.get(key)}. {message}
                   </a>
                 </li>
               ))}
@@ -241,13 +252,13 @@ export function Runner(props: RunnerProps) {
         <div className="nav">
           {definition.settings.allowBack && history.length > 0 ? (
             <button type="button" className="button secondary" onClick={onBack} disabled={submitting}>
-              Back
+              {ui.back}
             </button>
           ) : (
             <span />
           )}
           <button type="submit" className="button primary" disabled={submitting || props.busy}>
-            {isLast ? (submitting ? 'Submitting…' : 'Submit') : 'Next'}
+            {isLast ? (submitting ? ui.submitting : ui.submit) : ui.next}
           </button>
         </div>
         {props.status ? <div className="status">{props.status}</div> : null}
@@ -257,5 +268,6 @@ export function Runner(props: RunnerProps) {
         {announcement}
       </div>
     </main>
+    </UiContext.Provider>
   );
 }

@@ -17,7 +17,8 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import type { ApprovalPending, BankItem, Org, PublishResult, SurveyDetail, Theme, VersionDetail, VersionSummary } from '@survey/contracts';
+import type { ApprovalPending, BankItem, Draft, Org, PublishResult, SurveyDetail, Theme, VersionDetail, VersionSummary } from '@survey/contracts';
+import { languageName } from '../../../lib/languages';
 import {
   QUESTION_TYPES,
   QUESTION_TYPE_META,
@@ -1301,6 +1302,9 @@ function PublishDialog({
   // Phase 3A: with approvals on, publishing sends the draft for review instead.
   const org = useQuery({ queryKey: ['org'], queryFn: () => get<Org>('/org'), enabled: open });
   const needsApproval = org.data?.approvalRequired ?? false;
+  // Phase 3B: languages with untranslated strings (a warning: publishing isn't blocked).
+  const draftCheck = useQuery({ queryKey: ['draft-translations', survey.id], queryFn: () => get<Draft>(`/surveys/${survey.id}/draft`), enabled: open, staleTime: 0 });
+  const translationWarnings = draftCheck.data?.validation.translations ?? [];
 
   const publish = async () => {
     setBusy(true);
@@ -1383,6 +1387,23 @@ function PublishDialog({
           into a new version.
         </p>
       )}
+      {!sent && !errors.length && translationWarnings.length ? (
+        <Alert tone="warning" className="mt-3">
+          Some translations are incomplete. Respondents see the survey's own language where a string is missing.
+          <ul className="mt-2 list-disc pl-5">
+            {translationWarnings.map((w) => (
+              <li key={w.locale}>
+                {languageName(w.locale)}: {w.missing ? `${w.missing} missing` : null}
+                {w.missing && w.tokenMismatches ? ', ' : null}
+                {w.tokenMismatches ? `${w.tokenMismatches} with different piping` : null}
+              </li>
+            ))}
+          </ul>
+          <Link to={`/surveys/${survey.id}/translations`} className="mt-2 inline-block font-medium underline">
+            Review translations
+          </Link>
+        </Alert>
+      ) : null}
       {needsApproval && !sent && !errors.length ? (
         <div className="mt-3 flex flex-col gap-2">
           <p className="text-sm text-muted">Your organization requires approval: it goes live when an approver approves it.</p>

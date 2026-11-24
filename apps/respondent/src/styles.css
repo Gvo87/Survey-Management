@@ -145,8 +145,8 @@ h1:focus {
   min-width: 0;
 }
 .question.has-error {
-  border-left: 4px solid var(--error);
-  padding-left: 12px;
+  border-inline-start: 4px solid var(--error);
+  padding-inline-start: 12px;
 }
 .q-title {
   display: block;
@@ -170,7 +170,7 @@ h1:focus {
 }
 .q-counter {
   margin: 6px 0 0;
-  text-align: right;
+  text-align: end;
 }
 .q-error {
   color: var(--error);
@@ -332,7 +332,7 @@ h1:focus {
 }
 .error-summary ul {
   margin: 0;
-  padding-left: 20px;
+  padding-inline-start: 20px;
 }
 .error-summary a {
   color: var(--error);
@@ -616,7 +616,7 @@ h1:focus {
 }
 .slider-value {
   min-width: 6rem;
-  text-align: right;
+  text-align: end;
   font-weight: 600;
 }
 .slider.unset .slider-value {
@@ -657,7 +657,7 @@ h1:focus {
 }
 .file-input::file-selector-button {
   min-height: 44px;
-  margin-right: 12px;
+  margin-inline-end: 12px;
   padding: 0 16px;
   font: inherit;
   font-weight: 600;
@@ -680,9 +680,10 @@ h1:focus {
 .consent-statement {
   padding: 12px 14px;
   margin-bottom: 10px;
-  border-left: 4px solid var(--border);
+  border-inline-start: 4px solid var(--border);
   background: color-mix(in srgb, var(--text) 4%, var(--surface));
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-start-end-radius: var(--radius);
+  border-end-end-radius: var(--radius);
 }
 .consent-statement p {
   margin: 0 0 8px;
@@ -698,7 +699,7 @@ h1:focus {
 .password-gate {
   max-width: 360px;
   margin: 0 auto;
-  text-align: left;
+  text-align: start;
 }
 .password-gate .text-input {
   margin-bottom: 12px;
@@ -729,4 +730,18 @@ h1:focus {
 }
 :root[data-embed] .survey {
   padding: 12px 12px 24px;
+}
+
+/* ── Phase 3B: language picker (right-to-left layouts mirror through logical properties) ── */
+.language-picker {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+}
+.language-picker .select-input {
+  width: auto;
+  min-height: 40px;
 }

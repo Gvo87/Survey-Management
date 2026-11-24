@@ -37,6 +37,8 @@ export interface SurveyAccess {
   captcha?: boolean;
   /** argon2id hash; never returned by the API. */
   passwordHash?: string | null;
+  /** Phase 3B: respondents must sign in as members of the survey's org (never on anonymous surveys). */
+  requireLogin?: boolean;
 }
 
 /** Access settings with Phase 2A defaults filled in. */
@@ -48,6 +50,7 @@ export function readAccess(a: SurveyAccess): Required<SurveyAccess> {
     opensAt: a.opensAt ?? null,
     captcha: a.captcha ?? false,
     passwordHash: a.passwordHash ?? null,
+    requireLogin: a.requireLogin ?? false,
   };
 }
 
@@ -142,6 +145,8 @@ export const surveys = pgTable('surveys', {
   templateDescription: text('template_description'),
   /** Phase 3A. */
   folderId: uuid('folder_id'),
+  /** Phase 3B: delete responses older than this many days (null: the org default, if any). */
+  retentionDays: integer('retention_days'),
 });
 
 export const surveyVersions = pgTable('survey_versions', {
@@ -724,7 +729,113 @@ export const integrations = pgTable(
   (t) => [primaryKey({ columns: [t.orgId, t.kind] })],
 );
 
+// ── Phase 3B ─────────────────────────────────────────────────────────────
+export const ssoConnections = pgTable('sso_connections', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  protocol: text('protocol').$type<'oidc' | 'saml'>().notNull(),
+  name: text('name').notNull(),
+  configEnc: text('config_enc').notNull(),
+  summary: jsonb('summary').$type<Record<string, string>>().notNull().default({}),
+  defaultRole: text('default_role').$type<'creator' | 'analyst'>().notNull().default('creator'),
+  enabled: boolean('enabled').notNull().default(true),
+  lastLoginAt: ts('last_login_at'),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export const ssoDomains = pgTable(
+  'sso_domains',
+  {
+    orgId: uuid('org_id').notNull(),
+    domain: citext('domain').notNull(),
+    verificationToken: text('verification_token').notNull(),
+    verifiedAt: ts('verified_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.domain] })],
+);
+
+export const ssoIdentities = pgTable(
+  'sso_identities',
+  {
+    orgId: uuid('org_id').notNull(),
+    connectionId: uuid('connection_id').notNull(),
+    subject: text('subject').notNull(),
+    userId: uuid('user_id').notNull(),
+    email: citext('email').notNull(),
+    lastLoginAt: ts('last_login_at').notNull().defaultNow(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.connectionId, t.subject] })],
+);
+
+export interface InsightTheme {
+  label: string;
+  summary: string;
+  sentiment: 'positive' | 'neutral' | 'negative' | 'mixed';
+  count: number;
+  responseIds: string[];
+}
+export const textInsights = pgTable('text_insights', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  questionKey: text('question_key').notNull(),
+  status: text('status').$type<'pending' | 'done' | 'failed'>().notNull().default('pending'),
+  errorCode: text('error_code'),
+  provider: text('provider'),
+  model: text('model'),
+  responsesAnalysed: integer('responses_analysed').notNull().default(0),
+  responsesTotal: integer('responses_total').notNull().default(0),
+  summary: text('summary'),
+  themes: jsonb('themes').$type<InsightTheme[]>().notNull().default([]),
+  sentiment: jsonb('sentiment').$type<{ positive: number; neutral: number; negative: number }>(),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  requestedBy: uuid('requested_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  generatedAt: ts('generated_at'),
+});
+
+export const orgUsageMonthly = pgTable(
+  'org_usage_monthly',
+  {
+    orgId: uuid('org_id').notNull(),
+    month: date('month', { mode: 'string' }).notNull(),
+    responses: integer('responses').notNull().default(0),
+    surveysPublished: integer('surveys_published').notNull().default(0),
+    emailsSent: integer('emails_sent').notNull().default(0),
+    aiTokens: integer('ai_tokens').notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.month] })],
+);
+
+export const privacyRequests = pgTable('privacy_requests', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  kind: text('kind').$type<'export' | 'erase'>().notNull(),
+  subjectEmail: citext('subject_email').notNull(),
+  status: text('status').$type<'pending' | 'done' | 'failed'>().notNull().default('pending'),
+  result: jsonb('result').$type<Record<string, number>>().notNull().default({}),
+  storageKey: text('storage_key'),
+  filename: text('filename'),
+  size: integer('size'),
+  expiresAt: ts('expires_at'),
+  failure: text('failure'),
+  requestedBy: uuid('requested_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  completedAt: ts('completed_at'),
+});
+
 export const tables = {
+  ssoConnections,
+  ssoDomains,
+  ssoIdentities,
+  textInsights,
+  orgUsageMonthly,
+  privacyRequests,
   folders,
   teams,
   teamMembers,

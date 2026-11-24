@@ -1,7 +1,8 @@
 # Survey Management System
 
 A multi-tenant platform for building, publishing and analysing surveys. **Phase 1 (MVP), Phase 2A (builder
-power), Phase 2B (reach and insight) and Phase 3A (collaboration and platform API) are implemented:**
+power), Phase 2B (reach and insight), Phase 3A (collaboration and platform API) and Phase 3B (global and governed)
+are implemented:**
 
 - authentication, organizations and role-based access
 - a drag-and-drop builder with 16 question types and live preview
@@ -17,11 +18,17 @@ power), Phase 2B (reach and insight) and Phase 3A (collaboration and platform AP
 - notifications in the app, by email and in Slack (new responses, NPS detractors, milestones, closing)
 - an audit-log viewer with CSV export
 - a public REST API with scoped API keys, idempotency keys and an OpenAPI document, and signed webhooks with retries
+- surveys in several languages (browser detection, a language picker, right-to-left scripts, CSV import and export)
+- AI summaries of open answers (themes, sentiment, sample answers), opt-in per organization, through OpenAI
+- single sign-on with SAML or OpenID Connect, just-in-time provisioning and optional enforcement
+- surveys that only signed-in members of the organization can answer, once each
+- retention policies, usage metrics, subject export and erasure (GDPR/CCPA), and a platform console for super admins
 
 Design documents live in [`docs/`](docs/README.md): architecture, data model, API, roadmap, risks. Progress against
 the acceptance criteria is tracked in [`docs/phase-1-status.md`](docs/phase-1-status.md),
 [`docs/phase-2a-status.md`](docs/phase-2a-status.md), [`docs/phase-2b-status.md`](docs/phase-2b-status.md) and
-[`docs/phase-3a-status.md`](docs/phase-3a-status.md). Developers integrating with the platform start at
+[`docs/phase-3a-status.md`](docs/phase-3a-status.md) and [`docs/phase-3b-status.md`](docs/phase-3b-status.md).
+Developers integrating with the platform start at
 [`docs/public-api.md`](docs/public-api.md).
 
 ## Quick start
@@ -73,7 +80,7 @@ docker compose --profile scan up -d clamav
 | `creator@acme.test` | Creator in Acme (owns the NPS and event surveys) |
 | `analyst@acme.test` | Analyst in Acme (view access to the NPS survey only) |
 | `admin@globex.test` | Admin of *Globex* |
-| `super@survey.local` | Platform super admin with no org membership, so it has no access to org data |
+| `super@survey.local` | Platform super admin with no org membership: the *Platform* console shows every org's size and usage, but no survey data |
 
 The seed creates three surveys with about 500 responses each: an NPS survey, an anonymous employee pulse, and an
 event survey with two versions. It also creates a draft survey and a *Product research* survey (300 responses) that
@@ -81,7 +88,11 @@ uses logic and the Phase 2A question types, an *Acme brand* theme set as Acme's 
 question-bank entry. For Phase 2B it adds 30 contacts in a *Q4 customers* list and a draft campaign for the NPS
 survey (send it from the survey's Distribute tab and watch Mailpit), plus tags and a note on NPS responses. For Phase
 3A it files two surveys in a *Customer research* folder, adds an *Insights* team that can view the product research
-survey, an NPS-detractor notification rule and a review comment on the draft survey.
+survey, an NPS-detractor notification rule and a review comment on the draft survey. For Phase 3B the NPS survey
+gets French (complete) and Arabic (partial, right to left) translations, Acme keeps responses for two years (the
+event survey for one), *Team retro (members only)* asks respondents to sign in, `acme.test` is a verified SSO domain,
+and usage counters reflect the seeded data. AI summaries need a provider: set `AI_PROVIDER=fake` in `.env` for a
+deterministic stand-in, or `OPENAI_API_KEY` for OpenAI, then turn them on in Settings → General.
 `pnpm db:seed:large` adds a 50,000-response survey for performance checks.
 
 ## Scripts
@@ -92,7 +103,7 @@ survey, an NPS-detractor notification rule and a review comment on the draft sur
 | `pnpm verify` | Lint, typecheck, unit and integration tests, respondent bundle budget. Run before every PR. |
 | `pnpm test:unit` | `survey-core` engine tests (no database needed) |
 | `pnpm test:integration` | API tests against a real Postgres (`survey_test`) and Redis (db 15) |
-| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, logic (shared vectors), piping XSS, uploads, themes, embed on a strict-CSP page, a campaign through Mailpit, live results, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. |
+| `pnpm test:e2e` | Playwright: build → publish → respond → analyze, resume, offline retry, logic (shared vectors), piping XSS, uploads, themes, embed on a strict-CSP page, a campaign through Mailpit, live results, languages and right to left, AI summaries, SSO against a mock identity provider, members-only surveys, accessibility (axe). First run `pnpm --filter @survey/e2e install-browsers`. Playwright starts the API with `AI_PROVIDER=fake SSO_DOMAIN_VERIFICATION=auto`; if you run `pnpm dev` yourself first, set those two variables. |
 | `pnpm perf:results` | Analytics latency (including filters and segments) and a 50k-response XLSX export on the 50k seed. Writes `perf/results-summary.md`. |
 | `pnpm --filter @survey/e2e lighthouse` | Respondent load time (LCP) on simulated slow 4G. Writes `perf/lighthouse-respondent.md`. Needs the API running. |
 | `pnpm db:migrate` / `pnpm db:reset` | Apply migrations / drop everything and re-migrate (development only) |
@@ -130,6 +141,17 @@ perf/           Committed performance reports
   flagged.
 - **Versioning.** Survey content is an immutable JSON document per version (the database refuses edits to a
   published version). Responses keep their version.
+- **Languages.** Translations are stored per version, next to the definition, keyed by question and option keys,
+  so logic and piping are the same in every language. The API serves the survey already translated (from `?lang=` or
+  the browser's `Accept-Language`), and the respondent app mirrors for right-to-left scripts with CSS logical
+  properties: the bundle grew by under 1 KB.
+- **Single sign-on.** OpenID Connect (code flow with PKCE) and SAML 2.0, self-hosted (openid-client, node-saml).
+  Organizations prove they own an email domain with a DNS TXT record; only verified domains can sign in or be
+  enforced, so a misconfigured or malicious identity provider can't sign in as someone else.
+- **Members-only surveys.** The respondent site never sees the admin session cookie. A signed-in member gets a
+  two-minute, single-use token in the URL fragment, which the respondent app trades for a respondent token.
+- **AI summaries.** Behind a small provider interface (OpenAI, or a deterministic fake). Emails and phone numbers
+  are removed before sending, themes can only cite answers that were sent, and each org has a monthly token cap.
 - **Webhooks and the public API.** Events are queued in the transaction that caused them and fanned out by the
   worker, keyed by event id so retries never duplicate. Deliveries are signed (HMAC-SHA256), retried for 48 hours,
   logged per attempt, and only sent to public addresses. API keys are hashed, scoped and rate limited.
@@ -172,6 +194,13 @@ Every variable is documented in [`.env.example`](.env.example). For production:
 - Set `DATA_ENCRYPTION_KEY` (32+ random characters). It encrypts webhook signing secrets and integration tokens; the
   API refuses to start in production without it, and changing it makes stored secrets unreadable. Leave
   `ALLOW_PRIVATE_WEBHOOK_URLS` unset: outgoing webhooks and Slack calls are then checked against private networks.
+- AI summaries (optional): set `OPENAI_API_KEY` (and `OPENAI_MODEL` to change the default, `gpt-6-luna`).
+  `AI_MONTHLY_TOKEN_CAP` is the default allowance per org; super admins can change it per org. Response text is sent
+  to OpenAI, a third-party processor: cover it in your data processing agreements. Without a key the feature is
+  shown as unavailable.
+- Single sign-on: register `<app>/api/v1/auth/sso/oidc/callback` with OIDC providers; SAML providers get the ACS URL
+  and entity ID shown on the settings page. Leave `SSO_DOMAIN_VERIFICATION` unset (DNS TXT verification).
+- Retention purges run nightly in the worker (02:20 UTC).
 
 Deploy `apps/api/dist` (two processes: `node dist/main.js` and `node dist/worker.js`) after
 `pnpm install --prod`. Serve `apps/web/dist` and `apps/respondent/dist` as static files, with `/api/*` and `/r/*`
@@ -189,3 +218,7 @@ routed to the API on the same origins.
   the bucket on start when `S3_CREATE_BUCKET=true`.
 - **Uploaded files stay "Checking for malware…":** the worker isn't running (it runs with `pnpm dev`), or
   `MALWARE_SCANNER=clamav` is set but ClamAV is still starting.
+- **"AI summaries aren't available":** set `AI_PROVIDER=fake` (development) or `OPENAI_API_KEY`, then restart the API
+  and worker.
+- **SSO domains stay "Not verified" locally:** there is no DNS for test domains. Set `SSO_DOMAIN_VERIFICATION=auto`
+  (development only) and add the domain again.

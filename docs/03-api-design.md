@@ -506,3 +506,75 @@ OpenAPI 3.1 document is at `GET /api/v1/openapi.json` (no auth). Guide: [public-
 | GET | `/api/v1/audit-logs`, `/api/v1/audit-logs/export.csv` | `?action` (exact or a prefix such as `survey`) `&actorId&entityType&entityId&from&to&cursor`. Export: up to 50,000 rows, audited. |
 
 Where the build differs from §3.8 is listed in [phase-3a-status.md](phase-3a-status.md).
+
+## 3.13 Phase 3B additions (as built)
+
+**Languages.** Translations are flat maps from a text key to a string, per language, stored with each version
+(`survey_versions.translations`). Keys name a place, not a position: `survey.title`, `page.{key}.title`,
+`{questionKey}.title`, `{questionKey}.help`, `{questionKey}.option.{optionKey}`, `{questionKey}.row.{rowKey}`,
+`{questionKey}.{placeholder|lowLabel|highLabel|minLabel|maxLabel|unit|statement|linkLabel|patternMessage}`,
+`{textBlockKey}.body`, `thankYou.title|body`, `disqualified.title|body`, and `ui.{next|back|submit|…}` for the
+respondent app's buttons and messages.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/surveys/{id}/versions/{versionId}/translations` | → `{ versionId, versionNumber, status, defaultLocale, languages: [{ locale, dir, total, translated, missing, tokenMismatches }], strings: [{ key, source, context, long? }] }` (`survey.view`) |
+| GET / PUT / DELETE | `…/translations/{locale}` | `PUT { strings }` replaces the language (unknown keys and blanks dropped) → `{ locale, dir, strings, missing[], tokenMismatches[] }`. Works on the draft **and** on published versions (text only; audited as `survey.translation_saved` with `published: true`). `422 default_locale`, `422 invalid_locale`, `409 too_many_languages` (30). |
+| GET | `…/translations/{locale}/export.csv` | `key, context, source, translation`, UTF-8 with BOM, formula-protected cells. |
+| POST | `…/translations/{locale}/import` | `{ csv }` (any column order; needs `key` and `translation`) → `{ imported, unknownKeys[], translation }`. Merges: empty cells keep what's there. |
+| GET | `/api/v1/surveys/{id}/draft` | `validation.translations: [{ locale, missing, tokenMismatches }]`. |
+| POST | `/api/v1/surveys/{id}/publish` | The result adds `translationWarnings` (same shape). Missing strings never block publishing. |
+| GET | `/r/v1/s/{publicId}?lang=` | Serves the definition already translated. Language: `?lang=`, else the response's language when resuming, else `Accept-Language` (quality order; `pt-BR` also matches `pt`), else the default. Adds `language: { locale, dir, available[], ui }`. |
+| PUT / POST | `/r/v1/s/{publicId}/response[/complete]` | Optional top-level `locale`: the respondent switched language; the end screen and consent wording follow it. |
+
+**Login-required respondents (Q5).** `PATCH /surveys/{id} { access: { requireLogin } }`; refused on anonymous surveys
+(`422 login_not_allowed_anonymous`, either way round).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/r/v1/s/{publicId}` | Without a valid `X-Respondent-Token`: `access: { state: 'login_required', loginUrl }` (`{appUrl}/respond/{publicId}`) and no definition. With one: `respondent: { name, email }`. |
+| POST | `/api/v1/respondent-handoff` | Cookie session. `{ publicId, lang? }` → `{ url, survey: { title, orgName } }`: the survey URL with `#rt=<token>` (signed, 2 minutes, single use). `403 not_a_member`. Any of the user's orgs works, not only the active one. |
+| POST | `/r/v1/s/{publicId}/login` | `{ token }` → `{ respondentToken, responseKey, respondent }`. `401 invalid_login_token` when expired, reused, forged or for another survey. Send the token as `X-Respondent-Token` (12 hours) and use `responseKey`: it's derived from the survey and the member, so a member always continues the same response. Saving without a member answers `401 login_required`, another key `403 respondent_key_mismatch`, a second response `409 already_responded`. `resume-link` answers `403 not_available`. |
+
+**AI summaries (Q10: OpenAI, opt-in per org).**
+
+| Method | Path | Notes |
+|---|---|---|
+| PATCH | `/api/v1/org` | `{ ai: { enabled } }` (org admins). `422 ai_unavailable` when no provider is configured. `GET /org` adds `ai: { available, enabled, provider, model, monthlyTokenCap, tokensUsedThisMonth }`. |
+| GET | `/api/v1/surveys/{id}/insights` | `responses.view` → `{ ai, insights[] }`: the latest summary per question. |
+| POST | `/api/v1/surveys/{id}/insights` | `{ questionKey }` (short or long text) → `202 TextInsight` (`pending`), written by the worker. `403 ai_not_enabled`, `503 ai_unavailable`, `429 ai_token_cap_reached`, `422 not_a_text_question`. A summary already running for the question is returned instead of starting a second one. |
+| GET | `/api/v1/surveys/{id}/insights/{insightId}` | `{ status, provider, model, generatedAt, responsesAnalysed, responsesTotal, summary, themes: [{ label, summary, sentiment, count, samples: [{ responseId, text }] }], sentiment, tokens, error: { code, message } }`. Samples come from answers that still exist. |
+
+**Single sign-on.**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/org/sso` | Org admins → `{ enforced, canEnforce, connections[], domains[] }`. |
+| POST / PATCH / DELETE | `/api/v1/org/sso/connections[/{id}]` | OIDC `{ protocol: 'oidc', name, issuer, clientId, clientSecret?, defaultRole, enabled }` (discovery is checked on save: `422 invalid_issuer`); SAML `{ protocol: 'saml', name, entryPoint, idpIssuer, idpCert?, defaultRole, enabled }` (`422 invalid_certificate`). Secrets are write-only and encrypted. Each connection lists what to enter at the identity provider (`serviceProvider`) and a `loginUrl` to test with. |
+| POST / DELETE | `/api/v1/org/sso/domains[/{domain}]` | `{ domain }` → `{ domain, verified, txtRecord: { name: '_survey-verification.{domain}', value } }`. |
+| POST | `/api/v1/org/sso/domains/{domain}/verify` | Looks up the TXT record. `422 not_verified`, `409 domain_taken` (another org verified it). |
+| PATCH | `/api/v1/org` | `{ sso: { enforced } }`. `422 sso_not_ready` until a domain is verified and someone signed in through an enabled connection. Removing the last working connection or domain switches enforcement off (audited `sso.enforcement_relaxed`). |
+| POST | `/api/v1/auth/sso/discover` | `{ email }` → `{ connections: [{ id, name, protocol, loginUrl }], enforced }` for the org that verified the domain. Says nothing about accounts. |
+| GET | `/api/v1/auth/sso/{connectionId}/start?returnTo=/path` | `302` to the identity provider. Sets an `sso_bind` cookie (HttpOnly, Secure, SameSite=None, 10 minutes) that the callback must carry. |
+| GET | `/api/v1/auth/sso/oidc/callback` | Code, PKCE and nonce checked. `302` to `returnTo` with a session, or to `/login?sso_error=…`. |
+| POST | `/api/v1/auth/sso/saml/acs` | Form POST from the identity provider (`SAMLResponse`, `RelayState`); exempt from CSRF. Signed assertion, InResponseTo, audience, used once. |
+| GET | `/api/v1/auth/sso/saml/{connectionId}/metadata` | SP metadata XML (the URL is also the SP entity ID). |
+| POST | `/api/v1/auth/login`, `/signup`, `/password/reset`, `/invitations/{token}/accept` (new password) | `403 sso_required` (with `connections`) for enforced domains. `/password/forgot` still answers `202` but sends nothing. |
+
+The routes differ from §3.2's draft (`/auth/sso/{orgSlug}/start` and one `/auth/sso/callback`): a connection id starts
+a login, and each protocol has its own callback.
+
+**Retention, usage, privacy and the super-admin console.**
+
+| Method | Path | Notes |
+|---|---|---|
+| PATCH | `/api/v1/org` | `{ retention: { responsesDays: 1–3650 \| null } }`. `GET /org` adds `retention` and `sso`. |
+| PATCH | `/api/v1/surveys/{id}` | `{ retentionDays: 1–3650 \| null }`; the detail adds `retentionDays` and `effectiveRetentionDays`. |
+| GET | `/api/v1/org/usage?months=12` | Org admins → `{ months: [{ month, responses, surveysPublished, emailsSent, aiTokens }], totals, current: { members, surveys, responsesStored, storageBytes }, limits: { aiMonthlyTokenCap } }`. |
+| GET / POST | `/api/v1/privacy/requests` | Org admins. `{ subjectEmail, kind: 'export' \| 'erase', confirmEmail? }` (erasure needs `confirmEmail`: `422 confirmation_mismatch`) → `202`. |
+| GET | `/api/v1/privacy/requests/{id}[/download]` | `{ status, result: { contacts, campaignMessages, responses, files, aiSummaries?, anonymousSurveysNotSearched }, downloadUrl }`. The export is JSON, kept 7 days; downloads are audited. |
+| GET | `/api/v1/admin/overview?q&status` | Super admins → `{ orgs: [{ id, name, slug, plan, status, members, surveys, aiEnabled, aiMonthlyTokenCap, aiCapOverridden, thisMonth }], totals }`. |
+| GET | `/api/v1/admin/orgs/{id}/usage` | Super admins: the same report as `/org/usage`. |
+| PATCH | `/api/v1/admin/orgs/{id}` | Super admins. `{ status: 'active' \| 'suspended', plan, aiMonthlyTokenCap: number \| null, reason }`. Recorded in the org's own audit log. A suspended org's members lose access, its API keys stop and its links answer 404. |
+
+Where the build differs from the design is listed in [phase-3b-status.md](phase-3b-status.md).

@@ -136,6 +136,7 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
   const [onePerBrowser, setOnePerBrowser] = useState(survey.access.onePerBrowser);
   const [captcha, setCaptcha] = useState(survey.access.captcha);
   const [anonymous, setAnonymous] = useState(survey.anonymous);
+  const [requireLogin, setRequireLogin] = useState(survey.access.requireLogin);
   // Write-only: '' keeps the current password; `null` removes it.
   const [password, setPassword] = useState<string | null>('');
   const [message, setMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
@@ -146,6 +147,7 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
     setOnePerBrowser(survey.access.onePerBrowser);
     setCaptcha(survey.access.captcha);
     setAnonymous(survey.anonymous);
+    setRequireLogin(survey.access.requireLogin);
     setPassword('');
   }, [survey]);
   const passwordTooShort = typeof password === 'string' && password.length > 0 && password.length < 4;
@@ -159,6 +161,7 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
           quota: quota ? Number(quota) : null,
           onePerBrowser,
           captcha,
+          requireLogin,
           ...(password === null || password ? { password } : {}),
         },
         ...(anonymous !== survey.anonymous ? { anonymous } : {}),
@@ -284,14 +287,27 @@ function AccessSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: ()
             onChange={(e) => setOnePerBrowser(e.target.checked)}
           />
           <Checkbox
+            label="Respondents must sign in (members of this organization only)"
+            hint={
+              anonymous
+                ? "Not available for anonymous surveys: signing in identifies the respondent."
+                : 'Each member answers once and can continue on any device. People outside the organization can be reached with personal campaign links instead.'
+            }
+            checked={requireLogin}
+            disabled={anonymous}
+            onChange={(e) => setRequireLogin(e.target.checked)}
+          />
+          <Checkbox
             label="Anonymous responses"
             hint={
               locked
                 ? "Can't be changed after responses have been collected. Duplicate the survey instead."
-                : 'No identifying data is stored: no email questions, hidden fields only if non-identifying, times rounded to the hour.'
+                : requireLogin
+                  ? 'Turn off "Respondents must sign in" first.'
+                  : 'No identifying data is stored: no email questions, hidden fields only if non-identifying, times rounded to the hour.'
             }
             checked={anonymous}
-            disabled={locked}
+            disabled={locked || requireLogin}
             onChange={(e) => setAnonymous(e.target.checked)}
           />
           {message ? <Alert tone={message.tone}>{message.text}</Alert> : null}

@@ -5,7 +5,7 @@
  * The respondent app imports from here with `import type` only, so Zod stays out of its bundle.
  */
 import { z } from 'zod';
-import type { AnswerValue, Issue, Question, SurveyDefinition, ThemeTokens } from '@survey/core';
+import type { AnswerValue, Issue, Question, SurveyDefinition, ThemeTokens, TranslatableString, UiStrings } from '@survey/core';
 
 // ── Shared ───────────────────────────────────────────────────────────────────
 export const ORG_ROLES = ['org_admin', 'creator', 'analyst'] as const;
@@ -61,6 +61,12 @@ export const UpdateOrgRequest = z.object({
   /** Phase 3A: publishing needs approval by an org admin or a designated approver. */
   approvalRequired: z.boolean().optional(),
   approverIds: z.array(z.uuid()).max(50).optional(),
+  /** Phase 3B: delete responses older than N days (null keeps them). Surveys can override it. */
+  retention: z.object({ responsesDays: z.number().int().min(1).max(3650).nullable() }).optional(),
+  /** Phase 3B: AI summaries of open text (sends response text to the AI provider). */
+  ai: z.object({ enabled: z.boolean() }).optional(),
+  /** Phase 3B: members with an email in a verified domain must sign in with SSO. */
+  sso: z.object({ enforced: z.boolean() }).optional(),
 });
 export const UpdateMemberRequest = z.object({ role: z.enum(ORG_ROLES) });
 export const CreateInvitationRequest = z.object({ email: Email, role: z.enum(ORG_ROLES) });
@@ -74,6 +80,10 @@ export interface Org {
   /** Phase 3A. */
   approvalRequired: boolean;
   approverIds: string[];
+  /** Phase 3B. */
+  retention: { responsesDays: number | null };
+  ai: AiStatus;
+  sso: { enforced: boolean };
 }
 export interface Member {
   userId: string;
@@ -107,6 +117,8 @@ export const AccessSettings = z.object({
   onePerBrowser: z.boolean(),
   /** Require a CAPTCHA before a new response starts (Phase 2A). */
   captcha: z.boolean(),
+  /** Phase 3B: respondents sign in as members of the survey's org; one response each. Not for anonymous surveys. */
+  requireLogin: z.boolean(),
 });
 export type AccessSettings = z.infer<typeof AccessSettings> & { passwordEnabled: boolean };
 /** `password` is write-only: a string sets it, null removes it. */
@@ -127,6 +139,8 @@ export const UpdateSurveyRequest = z.object({
   themeId: z.uuid().nullable().optional(),
   /** Phase 3A: null moves the survey out of any folder. */
   folderId: z.uuid().nullable().optional(),
+  /** Phase 3B: delete this survey's responses after N days; null uses the org default. */
+  retentionDays: z.number().int().min(1).max(3650).nullable().optional(),
 });
 export const DuplicateSurveyRequest = z.object({ title: z.string().trim().min(1).max(300).optional() });
 export const SaveDraftRequest = z.object({ definition: z.unknown() });
@@ -174,11 +188,23 @@ export interface SurveyDetail extends SurveySummary {
   responseCount: number;
   themeId: string | null;
   isTemplate: boolean;
+  /** Phase 3B: the survey's own retention period (null: the org default applies). */
+  retentionDays: number | null;
+  /** Phase 3B: the period that applies (own or org default), null when responses are kept. */
+  effectiveRetentionDays: number | null;
 }
 
 export interface DraftValidation {
   errors: Issue[];
   warnings: Issue[];
+  /** Phase 3B: languages with untranslated strings (publishing warns, but doesn't block). */
+  translations?: TranslationWarning[];
+}
+
+export interface TranslationWarning {
+  locale: string;
+  missing: number;
+  tokenMismatches: number;
 }
 
 export interface Draft {
@@ -212,6 +238,8 @@ export interface PublishResult {
   version: { id: string; versionNumber: number; publishedAt: string };
   survey: SurveyDetail;
   publicUrl: string;
+  /** Phase 3B: languages published with missing strings (the default language shows there). */
+  translationWarnings: TranslationWarning[];
 }
 
 export interface Collaborator {
@@ -275,6 +303,8 @@ export const SaveResponseRequest = z.object({
   answers: z.record(z.string().max(40), AnswerValueSchema.nullable()),
   currentPageKey: z.string().max(40),
   hp: z.string().max(500).optional(),
+  /** Phase 3B: the language the respondent is answering in (they can switch mid-way). */
+  locale: z.string().max(20).optional(),
 });
 export type SaveResponseRequest = z.infer<typeof SaveResponseRequest>;
 
@@ -284,7 +314,9 @@ export type RespondentAccess =
   | { state: 'not_yet_open'; opensAt: string }
   | { state: 'password_required' }
   | { state: 'already_responded' }
-  | { state: 'not_found' };
+  | { state: 'not_found' }
+  /** Phase 3B: members only. `loginUrl` is on the admin app, which hands the respondent back signed in. */
+  | { state: 'login_required'; loginUrl: string };
 
 export const UnlockRequest = z.object({ password: z.string().min(1).max(200) });
 export interface UnlockResult {
@@ -320,6 +352,35 @@ export interface RespondentSurvey {
   presetHiddenFields: Record<string, string>;
   /** Phase 2B: contact fields for piping, when opened from a campaign link (never for anonymous surveys). */
   contact: Record<string, string> | null;
+  /** Phase 3B: the language served (the definition is already translated) and the others on offer. */
+  language: RespondentLanguage;
+  /** Phase 3B: the signed-in member answering a login-required survey. */
+  respondent: { name: string; email: string } | null;
+}
+
+export interface RespondentLanguage {
+  locale: string;
+  dir: 'ltr' | 'rtl';
+  /** Every language the survey offers, the default first. */
+  available: string[];
+  /** Buttons and messages in this language. */
+  ui: UiStrings;
+}
+
+/** Phase 3B: login-required surveys. The admin app asks for a one-time handoff link for the signed-in member. */
+export const RespondentHandoffRequest = z.object({ publicId: z.string().regex(/^[A-Za-z0-9]{6,20}$/), lang: z.string().max(20).optional() });
+export interface RespondentHandoffResult {
+  /** The survey on the respondent site, with a one-time token in the URL fragment (valid 2 minutes). */
+  url: string;
+  survey: { title: string; orgName: string };
+}
+export const RespondentLoginRequest = z.object({ token: z.string().min(20).max(1000) });
+export interface RespondentLoginResult {
+  /** Send as X-Respondent-Token. Valid for 12 hours. */
+  respondentToken: string;
+  /** The member's response key for this survey (the same on every device). */
+  responseKey: string;
+  respondent: { name: string; email: string };
 }
 
 export const ResumeLinkRequest = z.object({ email: z.email().max(254) });
@@ -466,6 +527,8 @@ export interface ResponseSummary {
   qualityFlags: string[];
   /** Phase 2B. */
   tags: { id: string; name: string }[];
+  /** Phase 3B: the language the response was given in. */
+  locale: string;
 }
 
 export interface FileInfo {
@@ -485,6 +548,8 @@ export interface ResponseDetail extends ResponseSummary {
   notes: { id: string; author: string | null; authorId: string | null; body: string; createdAt: string }[];
   /** Phase 2B: the campaign recipient, for non-anonymous surveys. */
   contact: { email: string; name: string } | null;
+  /** Phase 3B: the signed-in member, for login-required surveys. */
+  respondent: { email: string; name: string } | null;
 }
 
 export const ExportQuery = z.object({
@@ -1150,4 +1215,223 @@ export interface AuditEntry {
   entityType: string | null;
   entityId: string | null;
   metadata: Record<string, unknown>;
+}
+
+// ── Phase 3B: translations ───────────────────────────────────────────────────
+export const LocaleParam = z.string().regex(/^[a-z]{2,3}(-[A-Z][a-z]{3})?(-[A-Z]{2})?$/, 'Use a language code like fr or pt-BR.');
+export const SaveTranslationRequest = z.object({ strings: z.record(z.string().max(200), z.string().max(5000)) });
+export const ImportTranslationCsvRequest = z.object({ csv: z.string().min(1).max(900_000) });
+export interface TranslationLanguage {
+  locale: string;
+  dir: 'ltr' | 'rtl';
+  total: number;
+  translated: number;
+  missing: number;
+  tokenMismatches: number;
+}
+export interface TranslationsOverview {
+  versionId: string;
+  versionNumber: number;
+  status: 'draft' | 'published';
+  defaultLocale: string;
+  languages: TranslationLanguage[];
+  /** Every translatable string with its default-language text. */
+  strings: TranslatableString[];
+}
+export interface TranslationDetail {
+  locale: string;
+  dir: 'ltr' | 'rtl';
+  strings: Record<string, string>;
+  missing: string[];
+  tokenMismatches: string[];
+}
+export interface ImportTranslationResult {
+  imported: number;
+  /** Rows whose key isn't in this version (ignored). */
+  unknownKeys: string[];
+  translation: TranslationDetail;
+}
+
+// ── Phase 3B: AI summaries ───────────────────────────────────────────────────
+export interface AiStatus {
+  /** The platform has an AI provider configured. */
+  available: boolean;
+  /** An org admin opted in. */
+  enabled: boolean;
+  provider: string | null;
+  model: string | null;
+  monthlyTokenCap: number;
+  tokensUsedThisMonth: number;
+}
+export const CreateInsightRequest = z.object({ questionKey: z.string().min(1).max(40) });
+export interface InsightTheme {
+  label: string;
+  summary: string;
+  sentiment: 'positive' | 'neutral' | 'negative' | 'mixed';
+  /** Answers the provider assigned to this theme. */
+  count: number;
+  /** Sample answers (still present, never more than 5), linking to their responses. */
+  samples: { responseId: string; text: string }[];
+}
+export interface TextInsight {
+  id: string;
+  questionKey: string;
+  status: 'pending' | 'done' | 'failed';
+  error: { code: string; message: string } | null;
+  provider: string | null;
+  model: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+  responsesAnalysed: number;
+  responsesTotal: number;
+  summary: string | null;
+  themes: InsightTheme[];
+  sentiment: { positive: number; neutral: number; negative: number } | null;
+  tokens: number;
+}
+
+// ── Phase 3B: single sign-on ─────────────────────────────────────────────────
+const HttpsUrl = z.string().trim().max(500).pipe(z.url({ protocol: /^https?$/ }));
+export const SSO_PROTOCOLS = ['oidc', 'saml'] as const;
+export type SsoProtocol = (typeof SSO_PROTOCOLS)[number];
+const SsoBase = {
+  name: z.string().trim().min(1, 'Enter a name.').max(100),
+  defaultRole: z.enum(['creator', 'analyst']).default('creator'),
+  enabled: z.boolean().default(true),
+};
+export const SaveSsoConnectionRequest = z.discriminatedUnion('protocol', [
+  z.object({
+    protocol: z.literal('oidc'),
+    ...SsoBase,
+    issuer: HttpsUrl,
+    clientId: z.string().trim().min(1).max(300),
+    /** Write-only. Omit when editing to keep the current secret. */
+    clientSecret: z.string().min(1).max(1000).optional(),
+  }),
+  z.object({
+    protocol: z.literal('saml'),
+    ...SsoBase,
+    /** The identity provider's single sign-on URL (HTTP-Redirect binding). */
+    entryPoint: HttpsUrl,
+    /** The identity provider's entity ID (checked against the response's Issuer). */
+    idpIssuer: z.string().trim().min(1).max(500),
+    /** The identity provider's signing certificate (PEM or base64). */
+    idpCert: z.string().trim().min(100).max(20_000).optional(),
+  }),
+]);
+export type SaveSsoConnectionRequest = z.infer<typeof SaveSsoConnectionRequest>;
+export interface SsoConnection {
+  id: string;
+  protocol: SsoProtocol;
+  name: string;
+  defaultRole: 'creator' | 'analyst';
+  enabled: boolean;
+  /** Non-secret settings: issuer and client id (OIDC), entry point and IdP entity ID (SAML). */
+  summary: Record<string, string>;
+  lastLoginAt: string | null;
+  createdAt: string;
+  /** What to enter at the identity provider. */
+  serviceProvider: { redirectUri?: string; entityId?: string; acsUrl?: string; metadataUrl?: string };
+  /** Starts a login with this connection (use it to test). */
+  loginUrl: string;
+}
+export const AddSsoDomainRequest = z.object({
+  domain: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .max(253)
+    .regex(/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/, 'Enter a domain like example.com.'),
+});
+export interface SsoDomain {
+  domain: string;
+  verified: boolean;
+  verifiedAt: string | null;
+  /** Add this TXT record to the domain's DNS, then verify. */
+  txtRecord: { name: string; value: string };
+}
+export interface SsoSettings {
+  enforced: boolean;
+  /** Enforcement needs a verified domain and an SSO login that worked. */
+  canEnforce: boolean;
+  connections: SsoConnection[];
+  domains: SsoDomain[];
+}
+export const SsoDiscoverRequest = z.object({ email: Email });
+export interface SsoDiscoverResult {
+  /** Connections of the org that verified this email's domain (empty: sign in with a password). */
+  connections: { id: string; name: string; protocol: SsoProtocol; loginUrl: string }[];
+  /** Password sign-in is turned off for this domain. */
+  enforced: boolean;
+}
+
+// ── Phase 3B: usage ──────────────────────────────────────────────────────────
+export interface UsageMonth {
+  /** YYYY-MM */
+  month: string;
+  responses: number;
+  surveysPublished: number;
+  emailsSent: number;
+  aiTokens: number;
+}
+export interface UsageReport {
+  months: UsageMonth[];
+  totals: Omit<UsageMonth, 'month'>;
+  current: { members: number; surveys: number; responsesStored: number; storageBytes: number };
+  limits: { aiMonthlyTokenCap: number };
+}
+export const UsageQuery = z.object({ months: z.coerce.number().int().min(1).max(36).default(12) });
+
+// ── Phase 3B: super-admin console ────────────────────────────────────────────
+export const ORG_STATUSES = ['active', 'suspended'] as const;
+export const AdminOrgsQuery = z.object({ q: z.string().trim().max(200).optional(), status: z.enum(ORG_STATUSES).optional() });
+export const UpdateAdminOrgRequest = z.object({
+  status: z.enum(ORG_STATUSES).optional(),
+  plan: z.string().trim().min(1).max(40).optional(),
+  /** Monthly AI token cap for the org; null returns to the platform default. */
+  aiMonthlyTokenCap: z.number().int().min(0).max(1_000_000_000).nullable().optional(),
+  /** Recorded in the org's audit log. */
+  reason: z.string().trim().max(500).optional(),
+});
+export interface AdminOrg {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  status: 'active' | 'suspended';
+  createdAt: string;
+  members: number;
+  surveys: number;
+  aiEnabled: boolean;
+  aiMonthlyTokenCap: number;
+  /** The org has its own cap (otherwise the platform default applies). */
+  aiCapOverridden: boolean;
+  thisMonth: Omit<UsageMonth, 'month'>;
+}
+export interface AdminOverview {
+  orgs: AdminOrg[];
+  totals: { orgs: number; activeOrgs: number; members: number; surveys: number; thisMonth: Omit<UsageMonth, 'month'> };
+}
+
+// ── Phase 3B: privacy requests ───────────────────────────────────────────────
+export const PRIVACY_KINDS = ['export', 'erase'] as const;
+export const CreatePrivacyRequest = z.object({
+  subjectEmail: Email,
+  kind: z.enum(PRIVACY_KINDS),
+  /** Erasure can't be undone: the client must confirm the address again. */
+  confirmEmail: Email.optional(),
+});
+export interface PrivacyRequest {
+  id: string;
+  kind: 'export' | 'erase';
+  subjectEmail: string;
+  status: 'pending' | 'done' | 'failed';
+  /** Counts of what was found (export) or removed (erasure). */
+  result: Record<string, number>;
+  requestedBy: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  /** Exports only, for 7 days. */
+  downloadUrl: string | null;
+  failure: string | null;
 }

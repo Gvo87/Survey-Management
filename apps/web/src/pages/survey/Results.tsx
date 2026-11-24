@@ -51,6 +51,7 @@ import {
 } from '../../components/ui';
 import { formatDuration, formatNumber, formatPercent } from '../../lib/format';
 import { useSurvey } from './SurveyLayout';
+import { AiSummary } from './AiSummary';
 
 type Range = 'all' | '7' | '30' | 'custom';
 
@@ -376,6 +377,7 @@ function QuestionCard({ q, number, surveyId, filter }: { q: QuestionSummary; num
         {QUESTION_TYPE_META[q.type].label} · {formatNumber(q.answered)} answered
       </p>
       {words && openText ? <WordCloud surveyId={surveyId} questionKey={q.questionKey} filter={filter} /> : <QuestionBody q={q} view={view} surveyId={surveyId} />}
+      {openText && !q.removedInCurrentVersion ? <AiSummary surveyId={surveyId} questionKey={q.questionKey} answered={q.answered} /> : null}
     </Card>
   );
 }

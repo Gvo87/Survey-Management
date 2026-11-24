@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useNavigate } from 'react-router';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import type { NotificationInbox } from '@survey/contracts';
 import { get } from '../api';
@@ -37,6 +37,7 @@ function NotificationBell({ orgId }: { orgId: string }) {
 export function AppShell() {
   const { me, logout, switchOrg } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   if (!me) return null;
   const org = me.activeOrg;
   const link = ({ isActive }: { isActive: boolean }) =>
@@ -81,6 +82,11 @@ export function AppShell() {
             <NavLink to="/settings" className={link}>
               Settings
             </NavLink>
+            {me.user.isSuperAdmin ? (
+              <NavLink to="/admin" className={link}>
+                Platform
+              </NavLink>
+            ) : null}
           </nav>
           <div className="ml-auto flex items-center gap-3">
             {org ? <NotificationBell orgId={org.id} /> : null}
@@ -121,7 +127,7 @@ export function AppShell() {
         </div>
       ) : null}
       <main id="main" className="mx-auto w-full max-w-7xl flex-1 px-4 py-6">
-        {org ? (
+        {org || (me.user.isSuperAdmin && location.pathname === '/admin') ? (
           <Outlet />
         ) : (
           <Alert tone="info">You're not a member of any organization yet. Ask an admin to invite you.</Alert>
@@ -171,6 +177,15 @@ export function SettingsLayout() {
             </NavLink>
             <NavLink to="/settings/audit" className={link}>
               Audit log
+            </NavLink>
+            <NavLink to="/settings/sso" className={link}>
+              Single sign-on
+            </NavLink>
+            <NavLink to="/settings/usage" className={link}>
+              Usage
+            </NavLink>
+            <NavLink to="/settings/privacy" className={link}>
+              Privacy requests
             </NavLink>
           </>
         ) : null}

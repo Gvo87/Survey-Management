@@ -33,6 +33,8 @@ import { conflict, forbidden, notFound, unprocessable } from '../lib/errors';
 import { iso } from '../lib/misc';
 import { parse } from '../lib/validate';
 import { hashPassword, isUniqueViolation, startSession, toMe } from './auth';
+import { aiStatus } from '../ai/status';
+import { assertPasswordAllowed, canEnforceSso } from './sso';
 
 const INVITATION_TTL_MS = 7 * 24 * 3600 * 1000;
 
@@ -68,21 +70,28 @@ async function countAdmins(tx: Tx, orgId: string): Promise<number> {
 export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
   const { pool, jobs } = deps;
 
-  const toOrg = (org: typeof organizations.$inferSelect): Org => ({
-    id: org.id,
-    name: org.name,
-    slug: org.slug,
-    plan: org.plan,
-    approvalRequired: org.settings.approvalRequired === true,
-    approverIds: Array.isArray(org.settings.approverIds) ? (org.settings.approverIds as string[]) : [],
-  });
+  const toOrg = async (tx: Tx, org: typeof organizations.$inferSelect): Promise<Org> => {
+    const retention = (org.settings.retention ?? {}) as { responsesDays?: unknown };
+    const sso = (org.settings.sso ?? {}) as { enforced?: unknown };
+    return {
+      id: org.id,
+      name: org.name,
+      slug: org.slug,
+      plan: org.plan,
+      approvalRequired: org.settings.approvalRequired === true,
+      approverIds: Array.isArray(org.settings.approverIds) ? (org.settings.approverIds as string[]) : [],
+      retention: { responsesDays: typeof retention.responsesDays === 'number' ? retention.responsesDays : null },
+      ai: await aiStatus(deps, tx, org.id, org.settings),
+      sso: { enforced: sso.enforced === true },
+    };
+  };
 
   app.get('/api/v1/org', async (req) => {
     const auth = requireOrg(req);
     return withTenant(pool, auth.orgId, async (tx) => {
       const [org] = await tx.db.select().from(organizations).where(eq(organizations.id, auth.orgId));
       if (!org) throw notFound('Organization');
-      return toOrg(org);
+      return toOrg(tx, org);
     });
   });
 
@@ -107,6 +116,21 @@ export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
           throw unprocessable('invalid_approvers', 'Approvers must be admins or creators in this organization.');
         settings.approverIds = ids;
       }
+      // Phase 3B: retention default, AI opt-in, SSO enforcement.
+      if (body.retention !== undefined) settings.retention = { responsesDays: body.retention.responsesDays };
+      if (body.ai !== undefined) {
+        if (body.ai.enabled && !deps.ai)
+          throw unprocessable('ai_unavailable', "AI summaries aren't available on this platform: no AI provider is configured.");
+        settings.ai = { ...((settings.ai as object | undefined) ?? {}), enabled: body.ai.enabled };
+      }
+      if (body.sso !== undefined) {
+        if (body.sso.enforced && !(await canEnforceSso(tx, auth.orgId)))
+          throw unprocessable(
+            'sso_not_ready',
+            'Verify a domain and sign in once with single sign-on before enforcing it, so nobody is locked out.',
+          );
+        settings.sso = { ...((settings.sso as object | undefined) ?? {}), enforced: body.sso.enforced };
+      }
       const [org] = await tx.db
         .update(organizations)
         .set({ ...(body.name !== undefined ? { name: body.name } : {}), settings, updatedAt: new Date() })
@@ -116,10 +140,15 @@ export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
         orgId: auth.orgId,
         actorId: auth.userId,
         action: 'org.updated',
-        metadata: { fields: Object.keys(body) },
+        metadata: {
+          fields: Object.keys(body),
+          ...(body.retention ? { retentionDays: body.retention.responsesDays } : {}),
+          ...(body.ai ? { aiEnabled: body.ai.enabled } : {}),
+          ...(body.sso ? { ssoEnforced: body.sso.enforced } : {}),
+        },
         ip: req.ip,
       });
-      return toOrg(org!);
+      return toOrg(tx, org!);
     });
   });
 
@@ -373,6 +402,8 @@ export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
           ...(body.name ? [] : [{ path: 'name', code: 'required', message: 'Enter your name.' }]),
           ...(body.password ? [] : [{ path: 'password', code: 'required', message: 'Choose a password.' }]),
         ]);
+      // Phase 3B: domains that enforce SSO join through SSO (then accept while signed in).
+      await assertPasswordAllowed(deps, inv.email);
       userId = newId();
       createdUser = true;
       passwordHash = await hashPassword(body.password);

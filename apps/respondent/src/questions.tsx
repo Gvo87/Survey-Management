@@ -14,6 +14,7 @@ import {
   type ChoiceOption,
   type Question,
 } from '@survey/core';
+import { useUi } from './ui';
 
 export interface QuestionProps {
   question: Question;
@@ -38,6 +39,7 @@ export function describedBy(question: Question, error?: string, extra?: string):
 }
 
 export function TitleText({ question, number }: { question: Question; number: number }) {
+  const ui = useUi();
   return (
     <>
       <span className="q-number" aria-hidden="true">
@@ -50,7 +52,7 @@ export function TitleText({ question, number }: { question: Question; number: nu
             {' '}
             *
           </span>
-          <span className="sr-only"> (required)</span>
+          <span className="sr-only"> ({ui.required})</span>
         </>
       ) : null}
     </>
@@ -282,6 +284,7 @@ function Dropdown({
   seed,
   onChange,
 }: QuestionProps & { question: Extract<Question, { type: 'dropdown' }> }) {
+  const ui = useUi();
   const options = useMemo(
     () => orderOptions(question.options, question.config.randomize, `${seed}:${question.key}`),
     [question, seed],
@@ -297,7 +300,7 @@ function Dropdown({
         aria-describedby={describedBy(question, error)}
         onChange={(e) => onChange(e.target.value || null)}
       >
-        <option value="">{question.config.placeholder || 'Select an option'}</option>
+        <option value="">{question.config.placeholder || ui.selectPlaceholder}</option>
         {options.map((o) => (
           <option key={o.key} value={o.key}>
             {o.label}

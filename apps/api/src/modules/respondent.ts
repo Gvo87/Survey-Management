@@ -7,6 +7,8 @@
  *   through the logic decides which answers count; the rest are dropped.
  * Phase 2A adds password protection, open dates, CAPTCHA, file uploads, quality flags,
  * piped end screens, redirects and themes.
+ * Phase 3B adds languages (`?lang=` or Accept-Language; the definition is served translated) and
+ * login-required surveys for org members (see lib/respondent-tokens.ts).
  */
 import { createHash } from 'node:crypto';
 import { verify as verifyPassword } from '@node-rs/argon2';
@@ -14,10 +16,13 @@ import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { fileTypeFromBuffer } from 'file-type';
 import {
+  RespondentLoginRequest,
   ResumeLinkRequest,
   SaveResponseRequest,
   UnlockRequest,
   type CompleteResult,
+  type RespondentLanguage,
+  type RespondentLoginResult,
   type RespondentSurvey,
   type RespondentTheme,
   type ResumeState,
@@ -32,8 +37,12 @@ import {
   FILE_CATEGORY_MIME,
   findQuestion,
   listQuestions,
+  localizeDefinition,
+  negotiateLocale,
   pageIndex,
   pipe,
+  textDirection,
+  uiStrings,
   validatePartialAnswers,
   type AnswerValue,
   type Answers,
@@ -47,6 +56,7 @@ import {
   distributions,
   files,
   fromCells,
+  memberships,
   newId,
   readAccess,
   recipients,
@@ -56,6 +66,7 @@ import {
   surveyVersions,
   themes,
   toCells,
+  users,
   withGlobal,
   withTenant,
   type AnswerCell,
@@ -68,7 +79,9 @@ import { deviceType, toHour } from '../lib/misc';
 import { hmac, ipHash, safeEqual, testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
 import { RECIPIENT_TOKEN } from '../lib/campaign-email';
+import { memberResponseKey, signRespondentToken, verifyHandoff, verifyRespondentToken } from '../lib/respondent-tokens';
 import { effectiveStatus } from './surveys';
+import { translationsCacheKey } from './translations';
 import { emitEvent } from '../events';
 
 type SurveyRow = typeof surveys.$inferSelect;
@@ -158,6 +171,51 @@ async function loadDefinition(deps: Deps, tx: Tx, versionId: string): Promise<Su
   await deps.redis.set(cacheKey, JSON.stringify(row.definition), 'EX', 7 * 86400).catch(() => {});
   return row.definition;
 }
+
+/** Phase 3B: a version's translations. Editable on published versions, so cached until the next edit. */
+async function loadTranslations(deps: Deps, tx: Tx, versionId: string): Promise<Record<string, Record<string, string>>> {
+  const cacheKey = translationsCacheKey(versionId);
+  const cached = await deps.redis.get(cacheKey).catch(() => null);
+  if (cached) return JSON.parse(cached) as Record<string, Record<string, string>>;
+  const [row] = await tx.db.select({ translations: surveyVersions.translations }).from(surveyVersions).where(eq(surveyVersions.id, versionId));
+  const translations = row?.translations ?? {};
+  await deps.redis.set(cacheKey, JSON.stringify(translations), 'EX', 86400).catch(() => {});
+  return translations;
+}
+
+interface Localized {
+  definition: SurveyDefinition;
+  language: RespondentLanguage;
+  title: string;
+}
+
+/** The version in one language (the default where a string is missing). */
+function localize(definition: SurveyDefinition, translations: Record<string, Record<string, string>>, locale: string, title: string): Localized {
+  const available = [definition.defaultLocale, ...Object.keys(translations).filter((l) => l !== definition.defaultLocale).sort()];
+  const chosen = available.includes(locale) ? locale : definition.defaultLocale;
+  const strings = chosen === definition.defaultLocale ? undefined : translations[chosen];
+  return {
+    definition: localizeDefinition(definition, strings),
+    language: { locale: chosen, dir: textDirection(chosen), available, ui: uiStrings(strings) },
+    title: strings?.['survey.title']?.trim() || title,
+  };
+}
+
+/** Phase 3B: the signed-in member behind X-Respondent-Token, if they still belong to the org. */
+async function memberFor(req: FastifyRequest, deps: Deps, tx: Tx, survey: SurveyRow): Promise<{ id: string; name: string; email: string } | null> {
+  const header = req.headers['x-respondent-token'];
+  const userId = verifyRespondentToken(deps.config.sessionSecret, typeof header === 'string' ? header : undefined, survey.id);
+  if (!userId) return null;
+  const [row] = await tx.db
+    .select({ id: users.id, name: users.name, email: users.email, disabledAt: users.disabledAt })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(eq(memberships.orgId, survey.orgId), eq(memberships.userId, userId)));
+  return row && !row.disabledAt ? { id: row.id, name: row.name, email: row.email } : null;
+}
+
+const loginUrl = (deps: Deps, survey: SurveyRow, lang: string | undefined) =>
+  `${deps.config.appUrl}/respond/${survey.publicId}${lang ? `?lang=${encodeURIComponent(lang)}` : ''}`;
 
 /** The survey's theme, or the org default. Themes aren't versioned: edits apply to live surveys. */
 export async function themeFor(tx: Tx, survey: SurveyRow): Promise<RespondentTheme | null> {
@@ -335,7 +393,7 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
   const { pool, redis, config } = deps;
   type Params = { Params: { publicId: string } };
 
-  app.get<Params & { Querystring: { d?: string; t?: string } }>('/r/v1/s/:publicId', async (req, reply): Promise<RespondentSurvey> => {
+  app.get<Params & { Querystring: { d?: string; t?: string; lang?: string } }>('/r/v1/s/:publicId', async (req, reply): Promise<RespondentSurvey> => {
     reply.header('cache-control', 'no-store');
     const { orgId, surveyId } = await resolveSurvey(deps, req.params.publicId);
     const keyHash = responseKeyHash(req, false);
@@ -346,13 +404,17 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
 
       let resume: ResumeState | null = null;
       let versionId = survey.currentVersionId;
+      let resumeLocale: string | null = null;
+      // Phase 3B: login-required surveys only serve signed-in members (and only their own response).
+      const member = settings.requireLogin && !survey.anonymous ? await memberFor(req, deps, tx, survey) : null;
       if (keyHash) {
         const [existing] = await tx.db
           .select()
           .from(responses)
           .where(and(eq(responses.surveyId, survey.id), eq(responses.responseKeyHash, keyHash)));
-        if (existing) {
+        if (existing && (!existing.respondentUserId || existing.respondentUserId === member?.id)) {
           versionId = existing.versionId;
+          resumeLocale = existing.locale;
           const definition = await loadDefinition(deps, tx, existing.versionId);
           resume = toResume(existing, existing.status === 'in_progress' ? await loadAnswerValues(tx, definition, existing) : {});
         }
@@ -377,23 +439,37 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
       const locked = open && !resume && !hasAccessToken(req, config.sessionSecret, survey);
       const theme = await themeFor(tx, survey);
       const recipient = await recipientFor(tx, survey.id, typeof req.query.t === 'string' ? req.query.t : undefined);
+      // Phase 3B: the language asked for (?lang=), else the response's, else the browser's (Accept-Language).
+      const translations = await loadTranslations(deps, tx, versionId);
+      const definition = await loadDefinition(deps, tx, versionId);
+      const requested = typeof req.query.lang === 'string' ? req.query.lang.slice(0, 20) : resumeLocale;
+      const localized = localize(
+        definition,
+        translations,
+        negotiateLocale([definition.defaultLocale, ...Object.keys(translations)], definition.defaultLocale, requested, req.headers['accept-language']),
+        survey.title,
+      );
       const base = {
-        survey: { publicId: survey.publicId, title: survey.title, anonymous: survey.anonymous, onePerBrowser: settings.onePerBrowser },
+        survey: { publicId: survey.publicId, title: localized.title, anonymous: survey.anonymous, onePerBrowser: settings.onePerBrowser },
         resume,
         theme,
         captchaSiteKey: settings.captcha && !resume ? deps.captcha.siteKey : null,
         presetHiddenFields,
         contact: recipient && !survey.anonymous ? contactFields(recipient.contact) : null,
+        language: localized.language,
+        respondent: member ? { name: member.name, email: member.email } : null,
       };
       // One response per recipient: a used personal link says so (or resumes, via the response key).
       if (recipient?.recipient.status === 'responded' && !resume) return { ...base, access: { state: 'already_responded' }, version: null };
       if (access.code === 'not_yet_open' && !open)
         return { ...base, access: { state: 'not_yet_open', opensAt: settings.opensAt! }, version: null };
+      if (open && settings.requireLogin && !survey.anonymous && !member)
+        return { ...base, resume: null, access: { state: 'login_required', loginUrl: loginUrl(deps, survey, typeof req.query.lang === 'string' ? req.query.lang : undefined) }, version: null };
       if (locked) return { ...base, access: { state: 'password_required' }, version: null };
       return {
         ...base,
         access: open || resume?.status === 'completed' || resume?.status === 'disqualified' ? { state: 'open' } : { state: 'closed', message: access.message },
-        version: open || resume ? { id: versionId, definition: await loadDefinition(deps, tx, versionId) } : null,
+        version: open || resume ? { id: versionId, definition: localized.definition } : null,
       };
     });
   });
@@ -408,6 +484,34 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
     if (!(await verifyPassword(hash, password))) throw new AppError(401, 'wrong_password', "That password isn't right.");
     const exp = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_S;
     return { accessToken: accessTokenFor(config.sessionSecret, survey, exp) };
+  });
+
+  /** Phase 3B: exchange a one-time handoff token from the admin app for a respondent token. */
+  app.post<Params>('/r/v1/s/:publicId/login', async (req): Promise<RespondentLoginResult> => {
+    const { token } = parse(RespondentLoginRequest, req.body);
+    const { orgId, surveyId } = await resolveSurvey(deps, req.params.publicId);
+    await rateLimit(redis, `respondent-login:${ipHash(config.sessionSecret, req.ip)}`, 30, 300);
+    const handoff = verifyHandoff(config.sessionSecret, token);
+    const invalid = () => new AppError(401, 'invalid_login_token', 'This sign-in link has expired. Sign in again to continue.');
+    if (!handoff || handoff.surveyId !== surveyId) throw invalid();
+    // Single use: the first exchange claims the nonce until the token would have expired anyway.
+    const ttl = Math.max(1, handoff.expiresAt - Math.floor(Date.now() / 1000));
+    if ((await redis.set(`respondent-handoff:${handoff.nonce}`, '1', 'EX', ttl, 'NX')) !== 'OK') throw invalid();
+    return withTenant(pool, orgId, async (tx) => {
+      const [survey] = await tx.db.select().from(surveys).where(eq(surveys.id, surveyId));
+      if (!survey) throw notFound('Survey');
+      const [member] = await tx.db
+        .select({ name: users.name, email: users.email, disabledAt: users.disabledAt })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(and(eq(memberships.orgId, orgId), eq(memberships.userId, handoff.userId)));
+      if (!member || member.disabledAt) throw invalid();
+      return {
+        respondentToken: signRespondentToken(config.sessionSecret, surveyId, handoff.userId),
+        responseKey: memberResponseKey(config.sessionSecret, surveyId, handoff.userId),
+        respondent: { name: member.name, email: member.email },
+      };
+    });
   });
 
   app.get<Params>('/r/v1/s/:publicId/response', async (req, reply): Promise<ResumeState> => {
@@ -488,6 +592,20 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
             recipientId = recipient.recipient.id;
           }
         }
+        // Phase 3B: members only, one response each, under the member's own response key.
+        let respondentUserId: string | null = null;
+        if (readAccess(survey.access).requireLogin && !survey.anonymous) {
+          const member = await memberFor(req, deps, tx, survey);
+          if (!member) throw new AppError(401, 'login_required', 'Sign in to answer this survey.');
+          if (!keyHash.equals(sha256(memberResponseKey(config.sessionSecret, surveyId, member.id))))
+            throw forbidden('Reload the survey to continue.', 'respondent_key_mismatch');
+          const [taken] = await tx.db
+            .select({ id: responses.id })
+            .from(responses)
+            .where(and(eq(responses.surveyId, surveyId), eq(responses.respondentUserId, member.id)));
+          if (taken) throw conflict('already_responded', 'You have already responded to this survey.');
+          respondentUserId = member.id;
+        }
         if (start.versionId !== survey.currentVersionId)
           throw conflict('version_changed', 'This survey was just updated. Reload the page to continue.');
         await rateLimit(redis, `resp:new:${surveyId}:${ipHash(config.sessionSecret, req.ip)}`, 20, 60);
@@ -514,14 +632,23 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
             lastActivityAt: startedAt,
             // Anonymous surveys never link a response to a recipient (also enforced by a trigger).
             recipientId,
+            respondentUserId,
           })
           .returning();
       } else if (response.status === 'in_progress' && !canContinue(survey, access)) {
         throw gone(access.code === 'not_yet_open' ? 'survey_closed' : access.code, access.message);
+      } else if (response.respondentUserId && (await memberFor(req, deps, tx, survey))?.id !== response.respondentUserId) {
+        throw new AppError(401, 'login_required', 'Sign in again to continue this survey.');
       }
 
-      const row = response!;
+      let row = response!;
       const definition = await loadDefinition(deps, tx, row.versionId);
+      // Phase 3B: respondents can switch language mid-way; the end screen follows the latest choice.
+      if (body.locale && body.locale !== row.locale && row.status === 'in_progress' && body.seq > row.seq) {
+        const translations = await loadTranslations(deps, tx, row.versionId);
+        if (body.locale === definition.defaultLocale || body.locale in translations)
+          [row] = await tx.db.update(responses).set({ locale: body.locale }).where(eq(responses.id, row.id)).returning() as [ResponseRow];
+      }
       if (row.status !== 'in_progress' || body.seq <= row.seq) return { survey, response: row, definition, applied: false };
 
       const provided = Object.fromEntries(Object.entries(body.answers).filter(([, v]) => v !== null));
@@ -533,7 +660,8 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
           errors.map((e) => ({ path: e.questionKey, code: e.code, message: e.message, pageKey: e.pageKey })),
         );
       await checkFileAnswers(tx, definition, row, answers);
-      await replaceAnswers(tx, row, definition, answers);
+      // Consent answers record the wording the respondent saw, in their language.
+      await replaceAnswers(tx, row, await definitionIn(tx, row, definition), answers);
 
       const currentIndex = pageIndex(definition, body.currentPageKey);
       const furthestIndex = Math.max(currentIndex, row.furthestPageKey ? pageIndex(definition, row.furthestPageKey) : -1);
@@ -576,6 +704,13 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
     };
   }
 
+  /** The version as the respondent sees it, in the response's language. */
+  async function definitionIn(tx: Tx, response: ResponseRow, definition: SurveyDefinition): Promise<SurveyDefinition> {
+    if (response.locale === definition.defaultLocale) return definition;
+    const translations = await loadTranslations(deps, tx, response.versionId);
+    return translations[response.locale] ? localizeDefinition(definition, translations[response.locale]) : definition;
+  }
+
   app.post<Params>('/r/v1/s/:publicId/response/complete', async (req): Promise<CompleteResult> => {
     const saved = await applySave(req);
     if (saved.honeypot) {
@@ -587,8 +722,9 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
     return withTenant(pool, saved.orgId, async (tx) => {
       const [response] = await tx.db.select().from(responses).where(eq(responses.id, saved.response.id)).for('update');
       if (!response) throw notFound('Response');
+      const shown = await definitionIn(tx, response, definition);
       if (response.status !== 'in_progress')
-        return endScreen(definition, response, await loadAnswerValues(tx, definition, response), await contactForResponse(tx, response));
+        return endScreen(shown, response, await loadAnswerValues(tx, definition, response), await contactForResponse(tx, response));
 
       const stored = await loadAnswerValues(tx, definition, response);
       const result = checkCompletion(definition, stored, response.hiddenFields);
@@ -599,7 +735,7 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
           result.errors.map((e) => ({ path: e.questionKey, code: e.code, message: e.message, pageKey: e.pageKey })),
         );
       await checkFileAnswers(tx, definition, response, result.answers);
-      await replaceAnswers(tx, response, definition, result.answers);
+      await replaceAnswers(tx, response, shown, result.answers);
       // Files uploaded but no longer referenced (removed, or on a question the path skipped) are deleted.
       const kept = new Set(
         listQuestions(definition)
@@ -668,7 +804,7 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
       // Phase 3A: webhooks and notification rules (screened-out responses are submitted too).
       if (!response.isTest)
         await emitEvent(deps, tx, { orgId: saved.orgId, type: 'response.submitted', surveyId: survey.id, responseId: response.id });
-      return endScreen(definition, finished!, result.answers, await contactForResponse(tx, finished!));
+      return endScreen(shown, finished!, result.answers, await contactForResponse(tx, finished!));
     });
   });
 
@@ -687,6 +823,7 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
       const [row] = await tx.db.select().from(surveys).where(eq(surveys.id, surveyId));
       if (!row) throw notFound('Survey');
       if (row.anonymous) throw forbidden("Anonymous surveys can't email a resume link.", 'not_available');
+      if (readAccess(row.access).requireLogin) throw forbidden('Sign in on any device to continue this survey.', 'not_available');
       const [response] = await tx.db
         .select({ status: responses.status })
         .from(responses)
@@ -721,6 +858,8 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
       if (!survey || !response) throw conflict('not_started', 'Start the survey before uploading files.');
       if (response.status !== 'in_progress' || !canContinue(survey, accessFor(survey)))
         throw gone('survey_closed', 'This response can no longer be changed.');
+      if (response.respondentUserId && (await memberFor(req, deps, tx, survey))?.id !== response.respondentUserId)
+        throw new AppError(401, 'login_required', 'Sign in again to continue this survey.');
       if (survey.anonymous) throw forbidden("Anonymous surveys don't accept files.", 'uploads_not_allowed');
       const definition = await loadDefinition(deps, tx, response.versionId);
       const question = findQuestion(definition, questionKey);

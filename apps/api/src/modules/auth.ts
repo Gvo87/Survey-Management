@@ -38,6 +38,7 @@ import { rateLimit } from '../infra/rate-limit';
 import { hmac, ipHash } from '../lib/security';
 import { slugify } from '../lib/misc';
 import { parse } from '../lib/validate';
+import { assertPasswordAllowed, ssoForEmail } from './sso';
 
 export function toMe(auth: AuthContext): Me {
   const active = auth.memberships.find((m) => m.orgId === auth.orgId);
@@ -88,6 +89,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
     if (config.signupMode === 'invite_only')
       throw forbidden('Sign-up is by invitation only. Ask an admin to invite you.', 'signup_disabled');
     await rateLimit(redis, `signup:ip:${ipHash(config.sessionSecret, req.ip)}`, config.signupsPerHour, 3600);
+    // Phase 3B: a domain that enforces SSO gets its accounts through SSO, not passwords.
+    await assertPasswordAllowed(deps, body.email);
 
     const passwordHash = await hashPassword(body.password);
     const userId = newId();
@@ -132,6 +135,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
     const body = parse(LoginRequest, req.body);
     await rateLimit(redis, `login:ip:${ipHash(config.sessionSecret, req.ip)}`, 100, 900);
     await rateLimit(redis, `login:email:${hmac(config.sessionSecret, body.email)}`, 10, 900);
+    // Phase 3B: enforced SSO turns password sign-in off for the domain (says nothing about the account).
+    await assertPasswordAllowed(deps, body.email);
 
     const [user] = await withGlobal(pool, (tx) =>
       tx.db.select().from(users).where(eq(users.email, body.email)).limit(1),
@@ -193,7 +198,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
         .select({ id: users.id })
         .from(users)
         .where(and(eq(users.email, email), isNull(users.disabledAt)));
-      if (user) await jobs.enqueue(tx, 'email.send', { type: 'password_reset', userId: user.id });
+      // No reset emails for domains that enforce SSO (the answer stays the same).
+      if (user && !(await ssoForEmail(deps, email)).enforced) await jobs.enqueue(tx, 'email.send', { type: 'password_reset', userId: user.id });
     });
     // Same answer whether or not the account exists.
     return reply.code(202).send({ status: 'sent_if_account_exists' });
@@ -203,6 +209,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
     const { token, password } = parse(ResetPasswordRequest, req.body);
     const passwordHash = await hashPassword(password);
     const ok = await consumeToken(deps, token, 'password_reset', async (tx, userId) => {
+      const [user] = await tx.db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+      if (user) await assertPasswordAllowed(deps, user.email);
       await tx.db.update(users).set({ passwordHash }).where(eq(users.id, userId));
       // Revoke every existing session: whoever had the old password is logged out.
       await tx.db.delete(sessions).where(eq(sessions.userId, userId));

@@ -28,6 +28,9 @@ export default defineConfig({
       reuseExistingServer: reuse,
       timeout: 120_000,
       cwd: '..',
+      // Phase 3B: the deterministic AI stand-in, and SSO domains verified on adding (no DNS in tests). A
+      // `pnpm dev` that's already running is reused as it is: start it with these two variables set.
+      env: { AI_PROVIDER: 'fake', SSO_DOMAIN_VERIFICATION: 'auto' },
     },
     {
       command: 'pnpm --filter @survey/web dev',

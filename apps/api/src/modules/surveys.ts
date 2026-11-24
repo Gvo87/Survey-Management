@@ -18,10 +18,11 @@ import {
   type SurveyDetail,
   type SurveyRole,
   type SurveySummary,
+  type TranslationWarning,
   type VersionDetail,
   type VersionSummary,
 } from '@survey/contracts';
-import { createDefinition, remapDefinitionKeys, validateDefinition, type SurveyDefinition } from '@survey/core';
+import { checkTranslation, createDefinition, remapDefinitionKeys, validateDefinition, type SurveyDefinition } from '@survey/core';
 import { parseDefinition } from '@survey/core/schema';
 import {
   approvalRequests,
@@ -30,6 +31,7 @@ import {
   memberships,
   newId,
   newPublicId,
+  organizations,
   newToken,
   responses,
   surveyCollaborators,
@@ -53,6 +55,7 @@ import { decodeCursor, encodeCursor } from '../lib/misc';
 import { testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
 import { emitEvent } from '../events';
+import { recordUsage } from '../lib/usage';
 import { approvalSettings, requestApproval, toApprovalRequest } from './approvals';
 import { hashPassword } from './auth';
 
@@ -228,10 +231,34 @@ export async function publishDraft(
     surveyId: survey.id,
     versionId: draft.id,
   });
+  await recordUsage(tx, input.orgId, 'surveys_published', 1, now);
   return {
     version: { id: draft.id, versionNumber: draft.versionNumber, publishedAt: now.toISOString() },
     survey: updated!,
+    translationWarnings: translationWarnings(draft.definition, draft.translations, updated!.title),
   };
+}
+
+/** Phase 3B: languages with untranslated strings or piping tokens that differ from the source. */
+export function translationWarnings(
+  definition: SurveyDefinition,
+  translations: Record<string, Record<string, string>>,
+  title: string,
+): TranslationWarning[] {
+  return Object.entries(translations)
+    .map(([locale, strings]) => {
+      const check = checkTranslation(definition, strings, title);
+      return { locale, missing: check.missing.length, tokenMismatches: check.tokenMismatches.length };
+    })
+    .filter((w) => w.missing > 0 || w.tokenMismatches > 0)
+    .sort((a, b) => a.locale.localeCompare(b.locale));
+}
+
+/** Phase 3B: the org's default retention period, if any. */
+export async function orgRetentionDays(tx: Tx, orgId: string): Promise<number | null> {
+  const [org] = await tx.db.select({ settings: organizations.settings }).from(organizations).where(eq(organizations.id, orgId));
+  const days = (org?.settings.retention as { responsesDays?: unknown } | undefined)?.responsesDays;
+  return typeof days === 'number' ? days : null;
 }
 
 export async function buildDetail(
@@ -255,6 +282,8 @@ export async function buildDetail(
     isTemplate: survey.isTemplate,
     createdAt: survey.createdAt.toISOString(),
     responseCount: count?.n ?? 0,
+    retentionDays: survey.retentionDays,
+    effectiveRetentionDays: survey.retentionDays ?? (await orgRetentionDays(tx, survey.orgId)),
     testUrl:
       canEdit && survey.currentVersionId
         ? `${deps.config.respondentUrl}/s/${survey.publicId}?test=${testTokenFor(deps.config.sessionSecret, survey.id)}`
@@ -272,6 +301,7 @@ export function publicAccess(access: SurveyAccess): AccessSettings {
     onePerBrowser: a.onePerBrowser,
     captcha: a.captcha,
     passwordEnabled: Boolean(a.passwordHash),
+    requireLogin: a.requireLogin,
   };
 }
 
@@ -306,6 +336,7 @@ export async function validationFor(
   tx: Tx,
   survey: SurveyRow,
   definition: SurveyDefinition,
+  translations: Record<string, Record<string, string>> = {},
 ): Promise<DraftValidation> {
   const issues = validateDefinition(definition, {
     anonymous: survey.anonymous,
@@ -314,6 +345,7 @@ export async function validationFor(
   return {
     errors: issues.filter((i) => i.severity === 'error'),
     warnings: issues.filter((i) => i.severity === 'warning'),
+    translations: translationWarnings(definition, translations, survey.title),
   };
 }
 
@@ -337,7 +369,7 @@ async function toDraft(tx: Tx, survey: SurveyRow, draft: typeof surveyVersions.$
     revision: draft.revision,
     basedOnVersionNumber: base?.n ?? null,
     definition: draft.definition,
-    validation: await validationFor(tx, survey, draft.definition),
+    validation: await validationFor(tx, survey, draft.definition, draft.translations),
     updatedAt: draft.updatedAt.toISOString(),
   };
 }
@@ -358,6 +390,8 @@ export async function createSurveyRecords(
     anonymous?: boolean;
     access?: SurveyAccess;
     folderId?: string | null;
+    /** Phase 3B: translations to copy (duplicating a survey). */
+    translations?: Record<string, Record<string, string>>;
   },
 ): Promise<SurveyRow> {
   const surveyId = newId();
@@ -381,6 +415,7 @@ export async function createSurveyRecords(
     versionNumber: 1,
     status: 'draft',
     definition: input.definition,
+    translations: input.translations ?? {},
     createdBy: auth.userId,
     updatedBy: auth.userId,
   });
@@ -507,6 +542,13 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         access = { ...survey.access, ...rest };
         if (password !== undefined) access.passwordHash = password === null ? null : await hashPassword(password);
       }
+      // Phase 3B: signing in identifies the respondent, which an anonymous survey must never do.
+      const anonymous = body.anonymous ?? survey.anonymous;
+      if (anonymous && readAccess(access ?? survey.access).requireLogin)
+        throw unprocessable(
+          'login_not_allowed_anonymous',
+          body.anonymous ? 'Turn off "Respondents must sign in" before making the survey anonymous.' : "Anonymous surveys can't require respondents to sign in.",
+        );
       const [updated] = await tx.db
         .update(surveys)
         .set({
@@ -515,6 +557,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
           ...(access ? { access } : {}),
           ...(body.themeId !== undefined ? { themeId: body.themeId } : {}),
           ...(body.folderId !== undefined ? { folderId: body.folderId } : {}),
+          ...(body.retentionDays !== undefined ? { retentionDays: body.retentionDays } : {}),
           updatedAt: new Date(),
         })
         .where(eq(surveys.id, survey.id))
@@ -566,6 +609,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
       const copy = await createSurveyRecords(tx, auth, {
         title: body.title ?? `Copy of ${survey.title}`.slice(0, 300),
         definition,
+        translations: (draft ?? current)?.translations ?? {},
         anonymous: survey.anonymous,
         folderId: survey.folderId,
         access: { closesAt: null, quota: null, onePerBrowser: readAccess(survey.access).onePerBrowser, captcha: readAccess(survey.access).captcha },
@@ -696,6 +740,8 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
           versionNumber: (top?.n ?? 0) + 1,
           status: 'draft',
           definition: current!.definition,
+          // Phase 3B: the new version starts with the live version's translations.
+          translations: current!.translations,
           createdBy: auth.userId,
           updatedBy: auth.userId,
         })
@@ -747,7 +793,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
       reply.header('etag', `"rev-${saved.revision}"`);
       return {
         revision: saved.revision,
-        validation: await validationFor(tx, survey, saved.definition),
+        validation: await validationFor(tx, survey, saved.definition, saved.translations),
         updatedAt: saved.updatedAt.toISOString(),
       };
     });
@@ -823,6 +869,7 @@ export function registerSurveyRoutes(app: FastifyInstance, deps: Deps): void {
         version: published.version,
         survey: await buildDetail(deps, tx, published.survey, role),
         publicUrl: publicUrl(deps, published.survey)!,
+        translationWarnings: published.translationWarnings,
       };
     });
   });

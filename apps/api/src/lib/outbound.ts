@@ -163,3 +163,70 @@ export async function postJson(
     req.end(body);
   });
 }
+
+/**
+ * Phase 3B: a `fetch` for identity-provider calls (OIDC discovery, keys and tokens). The issuer URL is chosen
+ * by an org admin, so it gets the same protection as webhooks: addresses are resolved and checked, the
+ * connection goes to the checked address, redirects aren't followed, and the body is capped at 1 MB.
+ */
+export async function guardedFetch(
+  rawUrl: string,
+  init: { method?: string; headers?: Record<string, string>; body?: unknown; signal?: AbortSignal | null },
+  allowPrivate: boolean,
+): Promise<Response> {
+  const problem = checkOutboundUrl(rawUrl, allowPrivate);
+  if (problem) throw new OutboundError(problem, problem.startsWith('Private') ? 'blocked_address' : 'invalid_url');
+  const url = new URL(rawUrl);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const all = isIP(host) ? [{ address: host, family: isIP(host) }] : await lookup(host, { all: true, verbatim: true }).catch(() => []);
+  if (all.length === 0) throw new OutboundError(`Couldn't resolve ${host}.`, 'network');
+  if (!allowPrivate && all.some((a) => isPrivateAddress(a.address)))
+    throw new OutboundError(`${host} resolves to a private or reserved address.`, 'blocked_address');
+  const address = all[0]!;
+  const pinned: LookupFunction = (_hostname, opts, callback) => {
+    if (opts.all) callback(null, [address]);
+    else callback(null, address.address, address.family);
+  };
+  const body =
+    init.body === undefined || init.body === null
+      ? undefined
+      : typeof init.body === 'string'
+        ? init.body
+        : init.body instanceof URLSearchParams
+          ? init.body.toString()
+          : Buffer.from(init.body as ArrayBuffer);
+  const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise<Response>((resolve, reject) => {
+    const req = send(
+      url,
+      {
+        method: init.method ?? 'GET',
+        lookup: pinned,
+        headers: { 'user-agent': 'SurveyPlatform-SSO/1.0', ...init.headers, ...(body !== undefined ? { 'content-length': String(Buffer.byteLength(body)) } : {}) },
+        timeout: 10_000,
+        signal: init.signal ?? undefined,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > 1024 * 1024) return req.destroy(new OutboundError('The response is too large.', 'network'));
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(res.headers))
+            if (value !== undefined) for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v);
+          const status = res.statusCode ?? 502;
+          const nullBody = status === 204 || status === 304 || (status >= 100 && status < 200);
+          resolve(new Response(nullBody ? null : Buffer.concat(chunks), { status, headers }));
+        });
+        res.on('error', () => reject(new OutboundError('The connection broke while reading the response.', 'network')));
+      },
+    );
+    req.on('timeout', () => req.destroy(new OutboundError('No response within 10 s.', 'timeout')));
+    req.on('error', (error) => reject(error instanceof OutboundError ? error : new OutboundError(`Couldn't connect: ${error.message}`, 'network')));
+    req.end(body);
+  });
+}

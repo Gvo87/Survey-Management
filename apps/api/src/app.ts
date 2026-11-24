@@ -31,6 +31,13 @@ import { registerNotificationRoutes } from './modules/notifications';
 import { registerTeamRoutes } from './modules/teams';
 import { registerWebhookRoutes } from './modules/webhooks';
 import { buildOpenApiDocument } from './openapi';
+import { registerTranslationRoutes } from './modules/translations';
+import { registerSsoRoutes } from './modules/sso';
+import { registerInsightRoutes } from './modules/insights';
+import { registerUsageRoutes } from './modules/usage';
+import { registerAdminRoutes } from './modules/admin';
+import { registerPrivacyRoutes } from './modules/privacy';
+import { registerRespondentHandoffRoutes } from './modules/respondent-handoff';
 
 /** Log the path only: query strings and invitation tokens can carry secrets. */
 export function sanitizeUrl(url: string): string {
@@ -182,6 +189,14 @@ export async function buildApp(
   registerWebhookRoutes(app, deps);
   registerIntegrationRoutes(app, deps);
   registerAuditLogRoutes(app, deps);
+  // Phase 3B
+  registerTranslationRoutes(app, deps);
+  registerSsoRoutes(app, deps);
+  registerInsightRoutes(app, deps);
+  registerUsageRoutes(app, deps);
+  registerAdminRoutes(app, deps);
+  registerPrivacyRoutes(app, deps);
+  registerRespondentHandoffRoutes(app, deps);
 
   // The public API's curated OpenAPI 3.1 document (no authentication needed).
   const openApi = JSON.stringify(buildOpenApiDocument(`${deps.config.appUrl}`));

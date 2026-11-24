@@ -19,6 +19,10 @@ export const QUEUES = {
   deliverWebhook: 'webhooks.deliver',
   postToSlack: 'integrations.slack',
   cleanupPlatform: 'platform.cleanup',
+  // Phase 3B
+  generateInsight: 'insights.generate',
+  retentionPurge: 'retention.purge',
+  processPrivacyRequest: 'privacy.process',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

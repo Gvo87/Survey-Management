@@ -87,6 +87,9 @@ export function SurveyLayout() {
         <NavLink to="comments" className={tab}>
           Comments
         </NavLink>
+        <NavLink to="translations" className={tab}>
+          Translations
+        </NavLink>
         <NavLink to="settings" className={tab}>
           Settings
         </NavLink>

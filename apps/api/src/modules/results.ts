@@ -847,7 +847,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         ResponseRow & { version_number: number; distribution_name: string | null }
       >(
         `select r.id, r.status, r.is_test, r.started_at, r.completed_at, r.duration_ms, r.device_type, r.version_id,
-                r.quality_flags, v.version_number, d.name as distribution_name
+                r.quality_flags, r.locale, v.version_number, d.name as distribution_name
            from responses r
            join survey_versions v on v.id = r.version_id
            left join distributions d on d.id = r.distribution_id
@@ -869,6 +869,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
         version_number: number;
         distribution_name: string | null;
         quality_flags: string[];
+        locale: string;
       }[];
       const versions = versionsForFilter;
       const cells = await loadCells(
@@ -897,6 +898,7 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
           preview: first ? String(first.value).slice(0, 140) : '',
           qualityFlags: r.quality_flags,
           tags: tagRows.filter((t) => t.responseId === r.id).map(({ id, name }) => ({ id, name })),
+          locale: r.locale,
         };
       });
       const last = page.at(-1);
@@ -975,6 +977,10 @@ export function registerResultsRoutes(app: FastifyInstance, deps: Deps): void {
               .orderBy(responseNotes.createdAt)
           ).map(({ n, author }) => ({ id: n.id, author, authorId: n.authorId, body: n.body, createdAt: n.createdAt.toISOString() })),
           contact: await contactOf(tx, row.r.recipientId),
+          respondent: row.r.respondentUserId
+            ? ((await tx.db.select({ email: users.email, name: users.name }).from(users).where(eq(users.id, row.r.respondentUserId)))[0] ?? null)
+            : null,
+          locale: row.r.locale,
           hiddenFields: row.r.hiddenFields,
           answers,
           files: (await filesForResponses(tx, [row.r.id])).map((f) => ({

@@ -17,8 +17,11 @@
           var saved = JSON.parse(localStorage.getItem('sm:' + m[1]) || 'null');
           key = saved && saved.key;
         } catch (e) {}
-        var d = new URLSearchParams(location.search).get('d');
-        window.__surveyPrefetch = fetch('/r/v1/s/' + m[1] + (d ? '?d=' + encodeURIComponent(d) : ''), {
+        var q = new URLSearchParams(location.search);
+        var p = new URLSearchParams();
+        if (q.get('d')) p.set('d', q.get('d'));
+        if (q.get('lang')) p.set('lang', q.get('lang'));
+        window.__surveyPrefetch = fetch('/r/v1/s/' + m[1] + (p.toString() ? '?' + p : ''), {
           headers: key ? { 'X-Response-Key': key } : {},
         }).then(function (r) {
           return r.json().then(function (body) {
