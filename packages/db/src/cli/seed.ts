@@ -43,10 +43,13 @@ import {
   answers as answersTable,
   auditLogs,
   campaigns,
+  comments,
   contactListMembers,
   contactLists,
   contacts,
   distributions,
+  folders,
+  notificationRules,
   responseNotes,
   responseTags,
   tags,
@@ -57,9 +60,12 @@ import {
   themes,
   responses,
   surveyCollaborators,
+  surveyTeamCollaborators,
   surveys,
   surveyVersions,
   tables,
+  teamMembers,
+  teams as teamsTable,
   users,
 } from '../schema';
 
@@ -588,7 +594,7 @@ await seedSurvey({
   versions: [eventV1, eventV2],
   responses: 500,
 });
-await seedSurvey({
+const websiteSurveyId = await seedSurvey({
   orgId: acme,
   ownerId: acmeCreator.id,
   title: 'Website feedback (draft)',
@@ -596,7 +602,7 @@ await seedSurvey({
   versions: [npsSurvey],
   responses: 0,
 });
-await seedSurvey({
+const researchSurveyId = await seedSurvey({
   orgId: acme,
   ownerId: acmeAdmin.id,
   title: 'Product research – logic demo',
@@ -693,6 +699,51 @@ await db.insert(questionBankItems).values({
       body: 'Called the customer: billing confusion after the plan change. Sent a refund.',
     });
   }
+}
+
+// Phase 3A: a folder, a team with a shared survey, a notification rule and a review comment.
+{
+  const research = newId();
+  await db.insert(folders).values([
+    { id: research, orgId: acme, name: 'Customer research', createdBy: acmeAdmin.id },
+    { id: newId(), orgId: acme, parentId: research, name: '2026', createdBy: acmeAdmin.id },
+  ]);
+  await db.update(surveys).set({ folderId: research }).where(eq(surveys.id, npsSurveyId));
+  await db.update(surveys).set({ folderId: research }).where(eq(surveys.id, researchSurveyId));
+
+  const insights = newId();
+  await db.insert(teamsTable).values({ id: insights, orgId: acme, name: 'Insights' });
+  await db.insert(teamMembers).values([
+    { orgId: acme, teamId: insights, userId: acmeCreator.id },
+    { orgId: acme, teamId: insights, userId: acmeAnalyst.id },
+  ]);
+  await db.insert(surveyTeamCollaborators).values({
+    orgId: acme,
+    surveyId: researchSurveyId,
+    teamId: insights,
+    role: 'viewer',
+    addedBy: acmeAdmin.id,
+  });
+
+  await db.insert(notificationRules).values({
+    id: newId(),
+    orgId: acme,
+    surveyId: npsSurveyId,
+    kind: 'nps_detractor',
+    config: {},
+    channels: ['in_app'],
+    createdBy: acmeCreator.id,
+  });
+
+  const firstQuestion = listQuestions(npsSurvey)[0]!;
+  await db.insert(comments).values({
+    id: newId(),
+    orgId: acme,
+    surveyId: websiteSurveyId,
+    anchorKey: firstQuestion.key,
+    authorId: acmeAdmin.id,
+    body: 'Can we say "our website" instead of "Acme" here? This one goes to site visitors.',
+  });
 }
 
 await seedSurvey({

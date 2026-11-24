@@ -21,6 +21,16 @@ import { registerExportRoutes } from './modules/exports';
 import { registerTemplateRoutes } from './modules/templates';
 import { registerThemeRoutes } from './modules/themes';
 import { registerSurveyRoutes } from './modules/surveys';
+import { registerApiKeyRoutes } from './modules/api-keys';
+import { registerApprovalRoutes } from './modules/approvals';
+import { registerAuditLogRoutes } from './modules/audit-logs';
+import { registerCommentRoutes } from './modules/comments';
+import { registerFolderRoutes } from './modules/folders';
+import { registerIntegrationRoutes } from './modules/integrations';
+import { registerNotificationRoutes } from './modules/notifications';
+import { registerTeamRoutes } from './modules/teams';
+import { registerWebhookRoutes } from './modules/webhooks';
+import { buildOpenApiDocument } from './openapi';
 
 /** Log the path only: query strings and invitation tokens can carry secrets. */
 export function sanitizeUrl(url: string): string {
@@ -36,6 +46,7 @@ export function loggerOptions(deps: Deps): FastifyServerOptions['logger'] {
         'req.headers.authorization',
         'req.headers["x-csrf-token"]',
         'req.headers["x-response-key"]',
+        'req.headers["idempotency-key"]',
         'res.headers["set-cookie"]',
       ],
       censor: '[redacted]',
@@ -161,6 +172,22 @@ export async function buildApp(
   registerLiveRoutes(app, deps);
   registerResponseToolRoutes(app, deps);
   registerExportRoutes(app, deps);
+  // Phase 3A
+  registerFolderRoutes(app, deps);
+  registerTeamRoutes(app, deps);
+  registerCommentRoutes(app, deps);
+  registerApprovalRoutes(app, deps);
+  registerNotificationRoutes(app, deps);
+  registerApiKeyRoutes(app, deps);
+  registerWebhookRoutes(app, deps);
+  registerIntegrationRoutes(app, deps);
+  registerAuditLogRoutes(app, deps);
+
+  // The public API's curated OpenAPI 3.1 document (no authentication needed).
+  const openApi = JSON.stringify(buildOpenApiDocument(`${deps.config.appUrl}`));
+  app.get('/api/v1/openapi.json', async (_req, reply) =>
+    reply.header('cache-control', 'public, max-age=300').type('application/json').send(openApi),
+  );
 
   return app;
 }

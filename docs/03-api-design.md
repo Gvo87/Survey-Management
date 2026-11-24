@@ -475,3 +475,34 @@ hidden fields `eq, neq, in, not_in, text_contains, answered, not_answered` (case
 `gte, lte, between`.
 
 Where the build differs from §3.5–3.7 is listed in [phase-2b-status.md](phase-2b-status.md).
+
+## 3.12 Phase 3A additions (as built)
+
+**Public API.** `Authorization: Bearer sk_live_…` works on exactly the routes marked 🔑 (plus draft read/write, the
+results summary and contact lists), listed in `apps/api/src/auth/api-keys.ts`. Any other route answers
+`403 not_available_with_api_key`; a missing scope answers `403 insufficient_scope` with `requiredScope`. The curated
+OpenAPI 3.1 document is at `GET /api/v1/openapi.json` (no auth). Guide: [public-api.md](public-api.md).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET/POST/DELETE | `/api/v1/api-keys[/{id}]` | Org admins, cookie session only. `{ name, scopes, expiresAt? }` → `201 { …, key }` (shown once). Delete revokes. |
+| any POST | `Idempotency-Key: <1–255 printable ASCII>` | Same key and body within 24 h → the first response with `Idempotent-Replayed: true`. Same key, different body → `422 idempotency_key_reused`. Still running → `409 idempotency_in_progress`. Keys are per caller (API key or user). |
+| GET/POST, GET/PATCH/DELETE | `/api/v1/webhooks`, `/api/v1/webhooks/{id}` | As §3.8. `PATCH { active: true }` re-enables and resets the failure count. |
+| POST | `/api/v1/webhooks/{id}/rotate-secret`, `…/test` | Test sends a `ping` event now and returns `{ deliveryId, httpStatus, durationMs, error }`. |
+| GET | `/api/v1/webhooks/{id}/deliveries[/{deliveryId}]` | The detail adds `payload` and `attemptLog[]`. |
+| POST | `/api/v1/webhooks/{id}/deliveries/{deliveryId}/redeliver` | `202`. One manual attempt with the same event id; `409 delivery_pending` while automatic retries continue. |
+| GET/POST, PATCH/DELETE | `/api/v1/folders`, `/api/v1/folders/{id}` | `{ name, parentId? }`, at most 3 levels (`422 too_deep`). Delete moves contents up a level. |
+| GET/POST, PATCH/DELETE, PUT | `/api/v1/org/teams[/{id}]`, `/api/v1/org/teams/{id}/members` | `{ name }`, `{ userIds }` (replaces). Admins manage; everyone can list. |
+| GET, PUT/DELETE | `/api/v1/surveys/{id}/teams`, `/api/v1/surveys/{id}/teams/{teamId}` | `{ role: 'editor' \| 'viewer' }` (`survey.share`). |
+| GET/POST, PATCH/DELETE | `/api/v1/surveys/{id}/comments`, `…/comments/{commentId}` | `{ body, anchorKey?, parentId? }`; `{ body?, resolved? }`. Replies join the thread's first comment. |
+| GET | `/api/v1/approval-requests` | `?status&surveyId`. Only requests for surveys the caller can see. |
+| POST | `/api/v1/approval-requests/{id}/approve` · `/reject` · `/cancel` | `{ note? }`. `403 self_approval`, `403 not_an_approver`, `409 not_pending`, `409 approval_stale`. |
+| PATCH | `/api/v1/org` | Adds `approvalRequired` and `approverIds` (admins or creators). |
+| GET, POST | `/api/v1/notifications`, `/api/v1/notifications/read` | `?unread&cursor` → `{ data, nextCursor, unread }`; `{ ids } \| { all: true }`. |
+| GET/PUT | `/api/v1/notifications/preferences` | `{ channels: { [kind]: ('email' \| 'in_app')[] } }`. |
+| GET/PUT | `/api/v1/surveys/{id}/notification-rules` | `{ rules: [{ kind, config: { questionKey?, count? }, channels }] }`. Unchanged rules keep their id. |
+| GET, PUT, DELETE | `/api/v1/integrations`, `/api/v1/integrations/{slack\|hubspot\|google_sheets}` | Secrets are encrypted at rest and never returned. HubSpot and Google Sheets are stubs (saved, not synced). |
+| POST | `/api/v1/integrations/slack/test` | Posts a test message. |
+| GET | `/api/v1/audit-logs`, `/api/v1/audit-logs/export.csv` | `?action` (exact or a prefix such as `survey`) `&actorId&entityType&entityId&from&to&cursor`. Export: up to 50,000 rows, audited. |
+
+Where the build differs from §3.8 is listed in [phase-3a-status.md](phase-3a-status.md).

@@ -5,6 +5,7 @@ import type { Collaborator, Member, PageResult, SurveyDetail, SurveyRole, Theme 
 import { del, errorMessage, get, patch, post, put } from '../../api';
 import { useAuth } from '../../auth';
 import { Alert, Button, Card, ConfirmDialog, Dialog, SelectField, TextArea, TextField } from '../../components/ui';
+import { NotificationRules, TeamAccess } from './collaboration';
 import { useSurvey } from './SurveyLayout';
 
 export function SurveySettingsPage() {
@@ -70,6 +71,8 @@ export function SurveySettingsPage() {
       {canEdit ? <ThemePicker survey={survey} onSaved={refresh} /> : null}
 
       <Collaborators survey={survey} canShare={isOwner} />
+      <TeamAccess survey={survey} canShare={isOwner} />
+      <NotificationRules survey={survey} canEdit={canEdit} />
 
       <Card title="Other actions">
         <div className="flex flex-wrap gap-3">

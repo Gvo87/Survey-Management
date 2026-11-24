@@ -69,6 +69,7 @@ import { hmac, ipHash, safeEqual, testTokenFor } from '../lib/security';
 import { parse } from '../lib/validate';
 import { RECIPIENT_TOKEN } from '../lib/campaign-email';
 import { effectiveStatus } from './surveys';
+import { emitEvent } from '../events';
 
 type SurveyRow = typeof surveys.$inferSelect;
 type ResponseRow = typeof responses.$inferSelect;
@@ -660,9 +661,13 @@ export function registerRespondentRoutes(app: FastifyInstance, deps: Deps): void
         const counts = rows[0]!;
         if (counts.status === 'live' && counts.quota !== null && counts.completed_count >= counts.quota) {
           await tx.db.update(surveys).set({ status: 'closed', closedReason: 'quota', closedAt: now, updatedAt: now }).where(eq(surveys.id, survey.id));
+          await emitEvent(deps, tx, { orgId: saved.orgId, type: 'survey.closed', surveyId: survey.id, reason: 'quota' });
         }
         await deps.jobs.enqueue(tx, 'aggregates.response-completed', { orgId: saved.orgId, surveyId: survey.id, responseId: response.id });
       }
+      // Phase 3A: webhooks and notification rules (screened-out responses are submitted too).
+      if (!response.isTest)
+        await emitEvent(deps, tx, { orgId: saved.orgId, type: 'response.submitted', surveyId: survey.id, responseId: response.id });
       return endScreen(definition, finished!, result.answers, await contactForResponse(tx, finished!));
     });
   });

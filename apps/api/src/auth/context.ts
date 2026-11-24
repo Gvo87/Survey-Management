@@ -1,7 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Deps } from '../deps';
 import { conflict, forbidden, unauthorized } from '../lib/errors';
+import { requestContext } from '../lib/request-context';
 import { safeEqual } from '../lib/security';
+import { authenticateApiKey, checkApiKeyRoute, rateLimitApiKey, registerIdempotency } from './api-keys';
 import { orgCan, type OrgCapability } from './permissions';
 import { loadSession, sessionCookieName, type AuthContext, type OrgAuth } from './session';
 
@@ -18,12 +20,22 @@ const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  * - CSRF: cookie-authenticated unsafe requests must carry X-CSRF-Token (bound to the session).
  * - Org mismatch: if the client says which org it thinks is active (X-Org-Id) and that's no
  *   longer true (switched in another tab), reject with 409 instead of acting on the wrong org.
+ *
+ * Phase 3A: `Authorization: Bearer sk_live_…` authenticates with an API key instead (no cookie, no
+ * CSRF). The key's routes, scopes and rate limit are checked here too.
  */
 export function registerAuth(app: FastifyInstance, deps: Deps): void {
   app.decorateRequest('auth', null);
 
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/api/')) return;
+    const authorization = req.headers.authorization;
+    if (authorization?.startsWith('Bearer ')) {
+      req.auth = await authenticateApiKey(deps, authorization.slice('Bearer '.length).trim());
+      checkApiKeyRoute(req);
+      await rateLimitApiKey(deps, req, reply);
+      return;
+    }
     const token = req.cookies[sessionCookieName(deps.config)];
     if (!token) return;
     req.auth = await loadSession(deps.pool, deps.config, token);
@@ -42,11 +54,27 @@ export function registerAuth(app: FastifyInstance, deps: Deps): void {
       });
     }
   });
+
+  // Audit entries written during an API-key request record the key as the actor.
+  app.addHook('onRequest', (req, _reply, done) => {
+    const apiKeyId = req.auth?.apiKey?.id;
+    if (apiKeyId) requestContext.run({ apiKeyId }, done);
+    else done();
+  });
+
+  registerIdempotency(app, deps);
 }
 
 export function requireUser(req: FastifyRequest): AuthContext {
   if (!req.auth) throw unauthorized();
   return req.auth;
+}
+
+/** Session-only routes (the account itself, switching org): an API key can't use them. */
+export function requireSessionUser(req: FastifyRequest): AuthContext {
+  const auth = requireUser(req);
+  if (auth.apiKey) throw forbidden("This endpoint isn't part of the public API.", 'not_available_with_api_key');
+  return auth;
 }
 
 export function requireOrg(req: FastifyRequest, capability?: OrgCapability): OrgAuth {

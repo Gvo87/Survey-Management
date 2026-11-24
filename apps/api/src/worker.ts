@@ -31,6 +31,7 @@ await boss.schedule(QUEUES.cleanupSessions, '30 4 * * *');
 await boss.schedule(QUEUES.campaignReminders, '*/15 * * * *');
 await boss.schedule(QUEUES.scheduledReportsTick, '*/5 * * * *');
 await boss.schedule(QUEUES.cleanupExports, '45 3 * * *');
+await boss.schedule(QUEUES.cleanupPlatform, '0 4 * * *');
 
 console.log(`[worker] processing ${ALL_QUEUES.length} queues`);
 

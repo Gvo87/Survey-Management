@@ -1,6 +1,6 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { newToken, sessions, sha256, users, withGlobal, type Pool, type Tx } from '@survey/db';
-import type { OrgRole } from '@survey/contracts';
+import type { ApiScope, OrgRole } from '@survey/contracts';
 import type { Config } from '../config';
 import { csrfTokenFor } from '../lib/security';
 
@@ -26,6 +26,8 @@ export interface AuthContext {
   orgId: string | null;
   orgRole: OrgRole | null;
   memberships: Membership[];
+  /** Phase 3A: set when the request authenticated with an API key instead of a session. */
+  apiKey?: { id: string; name: string; scopes: ApiScope[] } | null;
 }
 
 export interface OrgAuth extends AuthContext {

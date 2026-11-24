@@ -8,6 +8,7 @@ import {
   type Invitation,
   type InvitationPreview,
   type Member,
+  type Org,
 } from '@survey/contracts';
 import {
   invitations,
@@ -18,6 +19,7 @@ import {
   sessions,
   sha256,
   surveyCollaborators,
+  teamMembers,
   users,
   withGlobal,
   withTenant,
@@ -66,12 +68,21 @@ async function countAdmins(tx: Tx, orgId: string): Promise<number> {
 export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
   const { pool, jobs } = deps;
 
+  const toOrg = (org: typeof organizations.$inferSelect): Org => ({
+    id: org.id,
+    name: org.name,
+    slug: org.slug,
+    plan: org.plan,
+    approvalRequired: org.settings.approvalRequired === true,
+    approverIds: Array.isArray(org.settings.approverIds) ? (org.settings.approverIds as string[]) : [],
+  });
+
   app.get('/api/v1/org', async (req) => {
     const auth = requireOrg(req);
     return withTenant(pool, auth.orgId, async (tx) => {
       const [org] = await tx.db.select().from(organizations).where(eq(organizations.id, auth.orgId));
       if (!org) throw notFound('Organization');
-      return { id: org.id, name: org.name, slug: org.slug, plan: org.plan };
+      return toOrg(org);
     });
   });
 
@@ -79,13 +90,36 @@ export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
     const auth = requireOrg(req, 'org.update');
     const body = parse(UpdateOrgRequest, req.body);
     return withTenant(pool, auth.orgId, async (tx) => {
+      const [current] = await tx.db.select().from(organizations).where(eq(organizations.id, auth.orgId));
+      if (!current) throw notFound('Organization');
+      const settings = { ...current.settings };
+      if (body.approvalRequired !== undefined) settings.approvalRequired = body.approvalRequired;
+      if (body.approverIds !== undefined) {
+        // Approvers must be admins or creators here (analysts can't edit, so they can't review either).
+        const ids = [...new Set(body.approverIds)];
+        const found = ids.length
+          ? await tx.db
+              .select({ userId: memberships.userId, role: memberships.role })
+              .from(memberships)
+              .where(and(eq(memberships.orgId, auth.orgId), inArray(memberships.userId, ids)))
+          : [];
+        if (found.length !== ids.length || found.some((m) => m.role === 'analyst'))
+          throw unprocessable('invalid_approvers', 'Approvers must be admins or creators in this organization.');
+        settings.approverIds = ids;
+      }
       const [org] = await tx.db
         .update(organizations)
-        .set({ name: body.name, updatedAt: new Date() })
+        .set({ ...(body.name !== undefined ? { name: body.name } : {}), settings, updatedAt: new Date() })
         .where(eq(organizations.id, auth.orgId))
         .returning();
-      await audit(tx, { orgId: auth.orgId, actorId: auth.userId, action: 'org.updated', ip: req.ip });
-      return { id: org!.id, name: org!.name, slug: org!.slug, plan: org!.plan };
+      await audit(tx, {
+        orgId: auth.orgId,
+        actorId: auth.userId,
+        action: 'org.updated',
+        metadata: { fields: Object.keys(body) },
+        ip: req.ip,
+      });
+      return toOrg(org!);
     });
   });
 
@@ -168,6 +202,7 @@ export function registerOrgRoutes(app: FastifyInstance, deps: Deps): void {
           .from(surveyCollaborators)
           .where(and(eq(surveyCollaborators.userId, removed), eq(surveyCollaborators.role, 'owner')));
         await tx.db.delete(surveyCollaborators).where(eq(surveyCollaborators.userId, removed));
+        await tx.db.delete(teamMembers).where(eq(teamMembers.userId, removed));
         for (const { surveyId } of owned) {
           await tx.db
             .insert(surveyCollaborators)

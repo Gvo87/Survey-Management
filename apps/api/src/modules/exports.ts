@@ -14,7 +14,7 @@ import { gone, notFound, unprocessable } from '../lib/errors';
 import { iso } from '../lib/misc';
 import { isValidTimeZone, nextRun } from '../lib/time';
 import { parse } from '../lib/validate';
-import { loadSurvey } from './surveys';
+import { loadSurvey, strongerRole, teamRoleOfUsersSql } from './surveys';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ExportRow = typeof dataExports.$inferSelect;
@@ -125,14 +125,14 @@ export function registerExportRoutes(app: FastifyInstance, deps: Deps): void {
   // ── Scheduled reports ───────────────────────────────────────────────────
   async function checkRecipients(tx: Tx, orgId: string, surveyId: string, ids: string[]) {
     const rows = await tx.db
-      .select({ id: users.id, role: memberships.role, shared: surveyCollaborators.role })
+      .select({ id: users.id, role: memberships.role, shared: surveyCollaborators.role, teamRole: teamRoleOfUsersSql(surveyId) })
       .from(users)
       .innerJoin(memberships, and(eq(memberships.userId, users.id), eq(memberships.orgId, orgId)))
       .leftJoin(surveyCollaborators, and(eq(surveyCollaborators.userId, users.id), eq(surveyCollaborators.surveyId, surveyId)))
       .where(inArray(users.id, ids));
     for (const id of new Set(ids)) {
       const row = rows.find((r) => r.id === id);
-      const role = row ? effectiveSurveyRole(row.role, row.shared ?? null) : null;
+      const role = row ? effectiveSurveyRole(row.role, strongerRole(row.shared ?? null, row.teamRole)) : null;
       if (!role || !surveyCan(role, 'responses.view'))
         throw unprocessable('invalid_recipient', 'Reports can only go to members of your organization who can see this survey’s responses.');
     }

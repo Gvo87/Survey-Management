@@ -140,6 +140,8 @@ export const surveys = pgTable('surveys', {
   themeId: uuid('theme_id'),
   isTemplate: boolean('is_template').notNull().default(false),
   templateDescription: text('template_description'),
+  /** Phase 3A. */
+  folderId: uuid('folder_id'),
 });
 
 export const surveyVersions = pgTable('survey_versions', {
@@ -500,7 +502,245 @@ export const scheduledReports = pgTable('scheduled_reports', {
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
+// ── Phase 3A: collaboration and the platform API ────────────────────────────
+export const folders = pgTable('folders', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  parentId: uuid('parent_id'),
+  name: text('name').notNull(),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const teams = pgTable('teams', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  name: text('name').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const teamMembers = pgTable(
+  'team_members',
+  {
+    orgId: uuid('org_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.teamId, t.userId] })],
+);
+
+export const surveyTeamCollaborators = pgTable(
+  'survey_team_collaborators',
+  {
+    orgId: uuid('org_id').notNull(),
+    surveyId: uuid('survey_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    role: text('role').$type<'editor' | 'viewer'>().notNull(),
+    addedBy: uuid('added_by'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.surveyId, t.teamId] })],
+);
+
+export const comments = pgTable('comments', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  anchorKey: text('anchor_key'),
+  parentId: uuid('parent_id'),
+  authorId: uuid('author_id'),
+  body: text('body').notNull(),
+  resolvedAt: ts('resolved_at'),
+  resolvedBy: uuid('resolved_by'),
+  editedAt: ts('edited_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'superseded' | 'cancelled';
+export const approvalRequests = pgTable('approval_requests', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  versionId: uuid('version_id'),
+  revision: integer('revision').notNull(),
+  status: text('status').$type<ApprovalStatus>().notNull().default('pending'),
+  requestedBy: uuid('requested_by').notNull(),
+  requestNote: text('request_note'),
+  decidedBy: uuid('decided_by'),
+  decisionNote: text('decision_note'),
+  decidedAt: ts('decided_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type NotificationKind = 'new_response' | 'nps_detractor' | 'threshold' | 'closing';
+export type NotificationChannel = 'email' | 'in_app' | 'slack';
+export interface NotificationRuleConfig {
+  /** nps_detractor: the NPS question to watch. */
+  questionKey?: string;
+  /** threshold: fire once when this many responses are complete. */
+  count?: number;
+}
+export const notificationRules = pgTable('notification_rules', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  surveyId: uuid('survey_id').notNull(),
+  kind: text('kind').$type<NotificationKind>().notNull(),
+  config: jsonb('config').$type<NotificationRuleConfig>().notNull().default({}),
+  channels: text('channels').array().$type<NotificationChannel[]>().notNull(),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const notificationFirings = pgTable(
+  'notification_firings',
+  {
+    orgId: uuid('org_id').notNull(),
+    ruleId: uuid('rule_id').notNull(),
+    eventId: text('event_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.ruleId, t.eventId] })],
+);
+
+/** kind → the channels a user accepts for it. A kind that's absent accepts every channel. */
+export type NotificationPreferenceMap = Partial<Record<NotificationKind, ('email' | 'in_app')[]>>;
+export const notificationPreferences = pgTable(
+  'notification_preferences',
+  {
+    orgId: uuid('org_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    channels: jsonb('channels').$type<NotificationPreferenceMap>().notNull().default({}),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId] })],
+);
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  userId: uuid('user_id').notNull(),
+  kind: text('kind').notNull(),
+  title: text('title').notNull(),
+  body: text('body').notNull().default(''),
+  link: text('link'),
+  surveyId: uuid('survey_id'),
+  inApp: boolean('in_app').notNull().default(true),
+  email: boolean('email').notNull().default(false),
+  emailedAt: ts('emailed_at'),
+  readAt: ts('read_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const apiKeys = pgTable('api_keys', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  name: text('name').notNull(),
+  prefix: text('prefix').notNull(),
+  keyHash: bytea('key_hash').notNull(),
+  scopes: text('scopes').array().notNull(),
+  createdBy: uuid('created_by').notNull(),
+  lastUsedAt: ts('last_used_at'),
+  expiresAt: ts('expires_at'),
+  revokedAt: ts('revoked_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    orgId: uuid('org_id').notNull(),
+    key: text('key').notNull(),
+    requestHash: bytea('request_hash').notNull(),
+    status: text('status').$type<'processing' | 'done'>().notNull().default('processing'),
+    statusCode: integer('status_code'),
+    contentType: text('content_type'),
+    response: text('response'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.key] })],
+);
+
+export const webhooks = pgTable('webhooks', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  url: text('url').notNull(),
+  description: text('description'),
+  events: text('events').array().notNull(),
+  surveyIds: uuid('survey_ids').array(),
+  secretEnc: text('secret_enc').notNull(),
+  previousSecretEnc: text('previous_secret_enc'),
+  previousSecretExpiresAt: ts('previous_secret_expires_at'),
+  active: boolean('active').notNull().default(true),
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  disabledReason: text('disabled_reason'),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+export type DeliveryStatus = 'pending' | 'succeeded' | 'failed';
+export const webhookDeliveries = pgTable('webhook_deliveries', {
+  id: uuid('id').primaryKey(),
+  orgId: uuid('org_id').notNull(),
+  webhookId: uuid('webhook_id').notNull(),
+  eventId: text('event_id').notNull(),
+  eventType: text('event_type').notNull(),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  status: text('status').$type<DeliveryStatus>().notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastHttpStatus: integer('last_http_status'),
+  nextAttemptAt: ts('next_attempt_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  finishedAt: ts('finished_at'),
+});
+
+export const webhookAttempts = pgTable('webhook_attempts', {
+  id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+  orgId: uuid('org_id').notNull(),
+  deliveryId: uuid('delivery_id').notNull(),
+  attempt: integer('attempt').notNull(),
+  manual: boolean('manual').notNull().default(false),
+  httpStatus: integer('http_status'),
+  error: text('error'),
+  durationMs: integer('duration_ms').notNull(),
+  responseSnippet: text('response_snippet'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export type IntegrationKind = 'slack' | 'hubspot' | 'google_sheets';
+export const integrations = pgTable(
+  'integrations',
+  {
+    orgId: uuid('org_id').notNull(),
+    kind: text('kind').$type<IntegrationKind>().notNull(),
+    configEnc: text('config_enc').notNull(),
+    summary: jsonb('summary').$type<Record<string, string>>().notNull().default({}),
+    status: text('status').$type<'connected' | 'error'>().notNull().default('connected'),
+    lastError: text('last_error'),
+    updatedBy: uuid('updated_by'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.kind] })],
+);
+
 export const tables = {
+  folders,
+  teams,
+  teamMembers,
+  surveyTeamCollaborators,
+  comments,
+  approvalRequests,
+  notificationRules,
+  notificationFirings,
+  notificationPreferences,
+  notifications,
+  apiKeys,
+  idempotencyKeys,
+  webhooks,
+  webhookDeliveries,
+  webhookAttempts,
+  integrations,
   contacts,
   contactLists,
   contactListMembers,

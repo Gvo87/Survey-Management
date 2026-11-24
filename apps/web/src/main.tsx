@@ -4,7 +4,7 @@ import { Navigate, Outlet, RouterProvider, createBrowserRouter } from 'react-rou
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError } from './api';
 import { AuthProvider, RequireAuth } from './auth';
-import { AppShell } from './components/AppShell';
+import { AppShell, SettingsLayout } from './components/AppShell';
 import {
   AcceptInvitePage,
   ForgotPasswordPage,
@@ -17,7 +17,14 @@ import { MembersPage, OrgSettingsPage } from './pages/settings';
 import { ThemesPage } from './pages/themes';
 import { ContactsPage } from './pages/contacts';
 import { SurveyListPage } from './pages/SurveyList';
+import { ApprovalsPage } from './pages/approvals';
+import { AuditLogPage } from './pages/audit';
+import { IntegrationsPage } from './pages/integrations';
+import { NotificationPreferencesPage, NotificationsPage } from './pages/notifications';
+import { ApiPage } from './pages/platform';
+import { TeamsPage } from './pages/teams';
 import { BuilderPage } from './pages/survey/builder/Builder';
+import { CommentsPage } from './pages/survey/Comments';
 import { DistributePage } from './pages/survey/Distribute';
 import { ResponseDetailPage, ResponsesPage } from './pages/survey/Responses';
 import { ResultsPage } from './pages/survey/Results';
@@ -72,12 +79,27 @@ const router = createBrowserRouter([
               { path: 'results', element: <ResultsPage /> },
               { path: 'responses', element: <ResponsesPage /> },
               { path: 'responses/:responseId', element: <ResponseDetailPage /> },
+              { path: 'comments', element: <CommentsPage /> },
               { path: 'settings', element: <SurveySettingsPage /> },
             ],
           },
-          { path: '/settings/members', element: <MembersPage /> },
-          { path: '/settings/org', element: <OrgSettingsPage /> },
-          { path: '/settings/themes', element: <ThemesPage /> },
+          { path: '/approvals', element: <ApprovalsPage /> },
+          { path: '/notifications', element: <NotificationsPage /> },
+          {
+            path: '/settings',
+            element: <SettingsLayout />,
+            children: [
+              { index: true, element: <Navigate to="/settings/members" replace /> },
+              { path: 'members', element: <MembersPage /> },
+              { path: 'teams', element: <TeamsPage /> },
+              { path: 'org', element: <OrgSettingsPage /> },
+              { path: 'themes', element: <ThemesPage /> },
+              { path: 'api', element: <ApiPage /> },
+              { path: 'integrations', element: <IntegrationsPage /> },
+              { path: 'audit', element: <AuditLogPage /> },
+              { path: 'notifications', element: <NotificationPreferencesPage /> },
+            ],
+          },
           { path: '/contacts', element: <ContactsPage /> },
           { path: '*', element: <p className="text-sm text-muted">Page not found.</p> },
         ],
