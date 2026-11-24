@@ -103,9 +103,13 @@ for (let i = 0; i < 60; i++) {
 }
 
 // 3. Lighthouse, mobile profile (simulated throttling), three runs, median LCP.
+// On CI runners Chrome's sandbox can't start (Ubuntu restricts the user namespaces it needs), so
+// chrome-launcher times out waiting for the debugging port. Playwright adds --no-sandbox itself;
+// chrome-launcher doesn't. /dev/shm is also small in CI containers. Local runs keep the sandbox.
+const ciFlags = process.env.CI ? ['--no-sandbox', '--disable-dev-shm-usage'] : [];
 const chrome = await chromeLauncher.launch({
   chromePath: chromium.executablePath(),
-  chromeFlags: ['--headless=new'],
+  chromeFlags: ['--headless=new', ...ciFlags],
 });
 const runs = [];
 try {
