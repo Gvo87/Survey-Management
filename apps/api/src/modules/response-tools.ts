@@ -8,12 +8,13 @@
 import { and, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { BulkDeleteRequest, CreateNoteRequest, CreateTagRequest, type BulkDeleteResult, type Tag } from '@survey/contracts';
-import { newId, rebuildSurveyAggregates, responseNotes, responses, responseTags, tags, withTenant, type Tx } from '@survey/db';
+import { newId, responseNotes, responses, responseTags, tags, withTenant, type Tx } from '@survey/db';
 import type { Deps } from '../deps';
 import { audit } from '../audit';
 import { requireOrg } from '../auth/context';
 import { conflict, forbidden, notFound } from '../lib/errors';
 import { parse } from '../lib/validate';
+import { deleteSurveyResponses } from '../lib/response-deletion';
 import { loadSurvey } from './surveys';
 import { Params, questionIndex, loadVersions, responseConditions } from './results';
 
@@ -171,17 +172,7 @@ export function registerResponseToolRoutes(app: FastifyInstance, deps: Deps): vo
           count: selected.length,
         });
       const ids = selected.map((r) => r.id);
-      const { rows: objects } = await tx.client.query<{ storage_key: string }>(
-        `select storage_key from files where response_id = any($1::uuid[])`,
-        [ids],
-      );
-      await tx.client.query(`delete from responses where id = any($1::uuid[])`, [ids]);
-      await rebuildSurveyAggregates(tx.client, survey.id);
-      await tx.client.query(
-        `update surveys set completed_count = (select count(*) from responses where survey_id = $1 and status = 'completed' and not is_test) where id = $1`,
-        [survey.id],
-      );
-      if (objects.length) await deps.jobs.enqueue(tx, 'files.delete-objects', { keys: objects.map((o) => o.storage_key) });
+      await deleteSurveyResponses(deps, tx, survey.id, ids);
       await audit(tx, {
         orgId: auth.orgId,
         actorId: auth.userId,

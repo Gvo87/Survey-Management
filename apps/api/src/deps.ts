@@ -7,6 +7,10 @@ import { createMailer, type Mailer } from './infra/mailer';
 import { createClamAvScanner, disabledScanner, fakeScanner, type MalwareScanner } from './infra/scanner';
 import { createSnsVerifier, type SnsVerifier } from './infra/sns';
 import { createMemoryStorage, createS3Storage, type ObjectStorage } from './infra/storage';
+import { resolveTxt } from 'node:dns/promises';
+import { fakeAiProvider } from './ai/fake';
+import { createOpenAiProvider } from './ai/openai';
+import type { AiProvider } from './ai/provider';
 
 /** Everything the HTTP app and the worker need, created once per process. */
 export interface Deps {
@@ -20,6 +24,17 @@ export interface Deps {
   captcha: CaptchaVerifier;
   /** SES bounce/complaint notifications arrive through SNS. Replaceable in tests. */
   sns: SnsVerifier;
+  /** Phase 3B: the AI provider for text summaries, or null when none is configured. Replaceable in tests. */
+  ai: AiProvider | null;
+  /** Phase 3B: DNS TXT lookups for SSO domain verification. Replaceable in tests. */
+  dns: { resolveTxt(name: string): Promise<string[][]> };
+}
+
+export function createAiProvider(config: Config): AiProvider | null {
+  if (config.ai.provider === 'fake') return fakeAiProvider;
+  if (config.ai.provider === 'openai' && config.ai.openaiApiKey)
+    return createOpenAiProvider({ apiKey: config.ai.openaiApiKey, model: config.ai.openaiModel, baseUrl: config.ai.openaiBaseUrl });
+  return null;
 }
 
 export async function createDeps(config: Config, opts: { worker: boolean }): Promise<Deps> {
@@ -35,7 +50,7 @@ export async function createDeps(config: Config, opts: { worker: boolean }): Pro
   const scanner =
     config.scanner === 'clamav' ? createClamAvScanner(config.clamav.host, config.clamav.port) : config.scanner === 'fake' ? fakeScanner : disabledScanner;
   const captcha = config.captcha === 'fake' ? fakeCaptcha : createTurnstileVerifier(config.turnstile.siteKey, config.turnstile.secretKey);
-  return { config, pool, redis, jobs, mailer, storage, scanner, captcha, sns: createSnsVerifier() };
+  return { config, pool, redis, jobs, mailer, storage, scanner, captcha, sns: createSnsVerifier(), ai: createAiProvider(config), dns: { resolveTxt } };
 }
 
 export async function closeDeps(deps: Deps): Promise<void> {

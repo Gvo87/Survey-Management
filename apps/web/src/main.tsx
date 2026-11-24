@@ -30,6 +30,12 @@ import { ResponseDetailPage, ResponsesPage } from './pages/survey/Responses';
 import { ResultsPage } from './pages/survey/Results';
 import { SurveySettingsPage } from './pages/survey/Settings';
 import { SurveyLayout } from './pages/survey/SurveyLayout';
+import { TranslationsPage } from './pages/survey/Translations';
+import { SsoSettingsPage } from './pages/sso';
+import { UsagePage } from './pages/usage';
+import { PrivacyRequestsPage } from './pages/privacy';
+import { PlatformAdminPage } from './pages/admin';
+import { RespondHandoffPage } from './pages/respond';
 import './styles.css';
 
 const queryClient = new QueryClient({
@@ -60,6 +66,15 @@ const router = createBrowserRouter([
       { path: '/reset-password', element: <ResetPasswordPage /> },
       { path: '/verify-email', element: <VerifyEmailPage /> },
       { path: '/invite/:token', element: <AcceptInvitePage /> },
+      // Phase 3B: login-required surveys hand signed-in members back to the respondent app.
+      {
+        path: '/respond/:publicId',
+        element: (
+          <RequireAuth>
+            <RespondHandoffPage />
+          </RequireAuth>
+        ),
+      },
       {
         element: (
           <RequireAuth>
@@ -80,6 +95,7 @@ const router = createBrowserRouter([
               { path: 'responses', element: <ResponsesPage /> },
               { path: 'responses/:responseId', element: <ResponseDetailPage /> },
               { path: 'comments', element: <CommentsPage /> },
+              { path: 'translations', element: <TranslationsPage /> },
               { path: 'settings', element: <SurveySettingsPage /> },
             ],
           },
@@ -98,8 +114,12 @@ const router = createBrowserRouter([
               { path: 'integrations', element: <IntegrationsPage /> },
               { path: 'audit', element: <AuditLogPage /> },
               { path: 'notifications', element: <NotificationPreferencesPage /> },
+              { path: 'sso', element: <SsoSettingsPage /> },
+              { path: 'usage', element: <UsagePage /> },
+              { path: 'privacy', element: <PrivacyRequestsPage /> },
             ],
           },
+          { path: '/admin', element: <PlatformAdminPage /> },
           { path: '/contacts', element: <ContactsPage /> },
           { path: '*', element: <p className="text-sm text-muted">Page not found.</p> },
         ],

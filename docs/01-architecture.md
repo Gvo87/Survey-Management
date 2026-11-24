@@ -177,8 +177,22 @@ auto-disables an endpoint after repeated failures, notifying org admins.
 - Public API (Phase 3): `Authorization: Bearer sk_…` API keys. Only a hash is stored. Keys are scoped per org and
   per permission. No cookies, so no CSRF.
 - Respondents: anonymous by default. Personalised email links carry a recipient token (Phase 2). Login-required
-  surveys come in Phase 3 (see open question Q5).
-- SSO (SAML/OIDC): Phase 3.
+  surveys (Phase 3B, Q5) are for members of the survey's org only. The respondent app runs on another origin, so the
+  admin session cookie never reaches it, and we don't want it to: that would need cross-site cookies and CORS with
+  credentials. Instead the respondent app sends the member to the admin app (`/respond/{publicId}`), where they sign
+  in as usual (password or SSO). The admin app asks the API for a **handoff token** (HMAC-signed, bound to survey and
+  user, valid 2 minutes, single use via Redis) and returns the member to the survey with it in the URL fragment,
+  which browsers never send to servers or in referrers. The respondent app removes it from the address bar and trades
+  it for a **respondent token** (12 hours, sessionStorage) and a response key derived from survey and user, so the
+  member resumes the same response on any device and can't start a second one. Membership is checked on every use.
+- SSO (Phase 3B): OpenID Connect (authorization code with PKCE and nonce, via openid-client) and SAML 2.0
+  (SP-initiated, signed assertions, InResponseTo and replay checks in Redis, via node-saml), self-hosted rather than
+  through a broker (risks E1). An org proves it owns an email domain with a DNS TXT record. An SSO login is accepted
+  only for an email in a verified domain of the connection's org, so an admin can't point a connection at their own
+  identity provider and sign in as someone else. First logins create the account (no password) and the membership
+  (creator or analyst, never admin). The login is bound to the browser that started it by a short-lived cookie.
+  Enforcement turns password sign-in, sign-up, resets and new-password invitations off for verified domains, and can
+  only be switched on after a successful SSO login. Issuer URLs go through the SSRF guard.
 
 **Authorization: two layers, combined**
 
@@ -234,7 +248,8 @@ capability × role (`apps/api/test/permissions.test.ts`).
 | Secrets | Webhook secrets and integration tokens encrypted with AES-256-GCM using envelope keys (AWS KMS in production, a key from env locally). API keys and tokens stored as SHA-256 hashes. Passwords hashed with argon2id. |
 | Abuse | Redis token-bucket rate limits per IP hash and per survey. Honeypot field. Optional Cloudflare Turnstile (Phase 2). IPs are hashed with a daily-rotating salt and **never written to Postgres**. |
 | Anonymous mode | Enforced server-side (not just hidden in the UI). See [Data model §2.7](02-data-model.md#27-anonymous-mode). |
-| GDPR/CCPA | Consent question type with the consent text version recorded (Phase 2). Per-respondent export and erasure by email or contact (Phase 3). Retention policies with purge jobs (Phase 3). Response deletion from Phase 1. |
+| GDPR/CCPA | Consent question type with the consent text version recorded (Phase 2). Per-respondent export and erasure by email or contact (Phase 3B: contacts, campaign recipients, and responses linked by campaign link, signed-in member, an answer or a hidden field equal to the address; audit entries hold counts, never the address). Retention policies with nightly purge jobs (Phase 3B). Response deletion from Phase 1. |
+| AI (Phase 3B) | Off until an org admin opts in. Answer text goes to OpenAI (third-party processor) with emails and phone numbers removed, under opaque short ids; replies must match a JSON schema, and themes can only cite answers that were sent. Answers are data, never instructions. Per-org monthly token cap, set by super admins. |
 | Audit | Append-only `audit_logs` (the app role has no UPDATE/DELETE grant), written from Phase 1. Viewer UI in Phase 3. |
 | Logs | Answer values, emails and tokens are never logged. pino redaction list is enforced in tests. |
 

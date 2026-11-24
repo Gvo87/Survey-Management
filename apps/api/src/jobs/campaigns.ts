@@ -8,6 +8,7 @@
  */
 import { eq, inArray, sql } from 'drizzle-orm';
 import { campaigns, distributions, newId, organizations, recipients, surveys, withGlobal, withTenant, type Tx } from '@survey/db';
+import { recordUsage } from '../lib/usage';
 import type { Deps } from '../deps';
 import { audit } from '../audit';
 import { recipientToken, recipientTokenHash, renderCampaignEmail } from '../lib/campaign-email';
@@ -146,6 +147,7 @@ export function campaignJobs(deps: Deps) {
       const failures = await deliver(deps, claimed.ctx, claimed.rows, false);
       await withTenant(pool, orgId, async (tx) => {
         for (const f of failures) await tx.db.update(recipients).set({ status: 'failed', error: f.error }).where(eq(recipients.id, f.id));
+        await recordUsage(tx, orgId, 'emails_sent', claimed.rows.length - failures.length);
         await jobs.enqueue(tx, 'campaigns.send', { orgId, campaignId });
       });
     },
@@ -184,10 +186,10 @@ export function campaignJobs(deps: Deps) {
         });
         if (!claimed) continue;
         const failures = await deliver(deps, claimed.ctx, claimed.rows, true);
-        if (failures.length)
-          await withTenant(pool, orgId, async (tx) => {
-            for (const f of failures) await tx.db.update(recipients).set({ error: f.error }).where(eq(recipients.id, f.id));
-          });
+        await withTenant(pool, orgId, async (tx) => {
+          for (const f of failures) await tx.db.update(recipients).set({ error: f.error }).where(eq(recipients.id, f.id));
+          await recordUsage(tx, orgId, 'emails_sent', claimed.rows.length - failures.length);
+        });
       }
     },
   };

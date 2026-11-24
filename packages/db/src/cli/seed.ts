@@ -17,6 +17,10 @@
  * Phase 2B: 30 contacts in a "Q4 customers" list (two unsubscribed, one bounced), a draft email
  * campaign for the NPS survey (send it and watch Mailpit), and tags and a note on NPS responses.
  *
+ * Phase 3B: the NPS survey in French (complete) and Arabic (partial, right to left), a two-year
+ * retention default for Acme (one year on the event survey), a members-only "Team retro" survey,
+ * acme.test as a verified SSO domain, and usage counters for everything seeded.
+ *
  * `--large` also adds a 50,000-response survey to Acme for performance checks.
  */
 import { hash } from '@node-rs/argon2';
@@ -25,6 +29,8 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import {
   bankQuestion,
   checkCompletion,
+  cleanTranslation,
+  translatableStrings,
   createDefinition,
   createOption,
   createQuestion,
@@ -59,6 +65,7 @@ import {
   questionBankItems,
   themes,
   responses,
+  ssoDomains,
   surveyCollaborators,
   surveyTeamCollaborators,
   surveys,
@@ -586,7 +593,7 @@ await seedSurvey({
   responses: 500,
   hidden: () => ({ team: pick(teams) }),
 });
-await seedSurvey({
+const eventSurveyId = await seedSurvey({
   orgId: acme,
   ownerId: acmeCreator.id,
   title: 'Event feedback – DevDays 2026',
@@ -746,6 +753,94 @@ await db.insert(questionBankItems).values({
   });
 }
 
+// Phase 3B: languages, retention, a members-only survey and a verified SSO domain.
+{
+  const FRENCH: Record<string, string> = {
+    'Customer NPS – Q4 2026': 'NPS clients – T4 2026',
+    'Your experience': 'Votre expérience',
+    'How likely are you to recommend Acme to a friend or colleague?': 'Quelle est la probabilité que vous recommandiez Acme à un ami ou à un collègue ?',
+    'What is the main reason for your score?': 'Quelle est la principale raison de votre note ?',
+    'Optional, but it really helps us.': 'Facultatif, mais cela nous aide beaucoup.',
+    'About you': 'À propos de vous',
+    'Which plan are you on?': 'Quelle formule utilisez-vous ?',
+    Free: 'Gratuite',
+    Team: 'Équipe',
+    Business: 'Business',
+    Enterprise: 'Entreprise',
+    'What do you use Acme for?': 'Pour quoi utilisez-vous Acme ?',
+    'Customer feedback': 'Avis clients',
+    'Market research': 'Études de marché',
+    'Employee surveys': 'Enquêtes auprès des salariés',
+    Events: 'Événements',
+    Other: 'Autre',
+    'How would you rate our support?': 'Comment évaluez-vous notre support ?',
+    'Not at all likely': 'Pas du tout probable',
+    'Extremely likely': 'Très probable',
+    'Thank you!': 'Merci !',
+    'Your response has been recorded.': 'Votre réponse a bien été enregistrée.',
+    Next: 'Suivant',
+    Back: 'Retour',
+    Submit: 'Envoyer',
+    'Submitting…': 'Envoi…',
+    required: 'obligatoire',
+    'This question is required.': 'Cette question est obligatoire.',
+    'Please check these answers:': 'Vérifiez ces réponses :',
+    'Page {n} of {total}': 'Page {n} sur {total}',
+    'Select an option': 'Choisissez une option',
+    Language: 'Langue',
+    "This survey is anonymous. Your answers aren't linked to you.": 'Ce questionnaire est anonyme. Vos réponses ne sont pas liées à vous.',
+  };
+  const ARABIC: Record<string, string> = {
+    'Customer NPS – Q4 2026': 'مؤشر صافي الترويج للعملاء – الربع الرابع 2026',
+    'Your experience': 'تجربتك',
+    'How likely are you to recommend Acme to a friend or colleague?': 'ما مدى احتمال أن توصي بـ Acme لصديق أو زميل؟',
+    'What is the main reason for your score?': 'ما السبب الرئيسي لتقييمك؟',
+    'About you': 'عنك',
+    Next: 'التالي',
+    Back: 'السابق',
+    Submit: 'إرسال',
+    Language: 'اللغة',
+    'Page {n} of {total}': 'الصفحة {n} من {total}',
+  };
+  const translate = (dictionary: Record<string, string>) =>
+    cleanTranslation(
+      npsSurvey,
+      Object.fromEntries(translatableStrings(npsSurvey, 'Customer NPS – Q4 2026').flatMap((t) => (dictionary[t.source] ? [[t.key, dictionary[t.source]!]] : []))),
+      'Customer NPS – Q4 2026',
+    );
+  const [nps] = await db.select({ versionId: surveys.currentVersionId }).from(surveys).where(eqId(npsSurveyId));
+  await db.update(surveyVersions).set({ translations: { fr: translate(FRENCH), ar: translate(ARABIC) } }).where(eq(surveyVersions.id, nps!.versionId!));
+
+  await db
+    .update(organizations)
+    .set({ settings: { retention: { responsesDays: 730 }, ai: { enabled: false }, sso: { enforced: false } } })
+    .where(eq(organizations.id, acme));
+  await db.update(surveys).set({ retentionDays: 365 }).where(eqId(eventSurveyId));
+
+  const retroId = await seedSurvey({
+    orgId: acme,
+    ownerId: acmeAdmin.id,
+    title: 'Team retro (members only)',
+    status: 'live',
+    versions: [
+      definition([
+        {
+          title: 'Looking back',
+          elements: [
+            q(createQuestion('rating', 'How did this quarter go for you?'), { required: true }),
+            createQuestion('long_text', 'What should we keep doing?'),
+            createQuestion('long_text', 'What should we change?'),
+          ],
+        },
+      ]),
+    ],
+    responses: 0,
+  });
+  await db.update(surveys).set({ access: { closesAt: null, quota: null, onePerBrowser: false, requireLogin: true } }).where(eqId(retroId));
+
+  await db.insert(ssoDomains).values({ orgId: acme, domain: 'acme.test', verificationToken: newToken(16), verifiedAt: new Date() });
+}
+
 await seedSurvey({
   orgId: globex,
   ownerId: globexAdmin.id,
@@ -766,6 +861,18 @@ if (large) {
     responses: 50_000,
   });
 }
+
+// Phase 3B: usage counters for what was seeded (the app counts as things happen).
+await pool.query(`
+  insert into org_usage_monthly (org_id, month, responses)
+    select org_id, date_trunc('month', completed_at at time zone 'UTC')::date, count(*)
+      from responses where status = 'completed' and not is_test and completed_at is not null group by 1, 2
+  on conflict (org_id, month) do update set responses = excluded.responses;
+  insert into org_usage_monthly (org_id, month, surveys_published)
+    select org_id, date_trunc('month', published_at at time zone 'UTC')::date, count(*)
+      from survey_versions where status = 'published' and published_at is not null group by 1, 2
+  on conflict (org_id, month) do update set surveys_published = excluded.surveys_published;
+`);
 
 await pool.end();
 console.log(`[seed] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);

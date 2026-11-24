@@ -17,6 +17,7 @@ import {
   TextField,
 } from '../../components/ui';
 import { formatDateTime, formatDuration } from '../../lib/format';
+import { languageName } from '../../lib/languages';
 import { useSurvey } from './SurveyLayout';
 
 const STATUS_LABEL = {
@@ -333,6 +334,18 @@ export function ResponseDetailPage() {
                     </dd>
                   </>
                 ) : null}
+                {r.respondent ? (
+                  <>
+                    <dt className="text-muted">Signed in as</dt>
+                    <dd className="break-all">
+                      {r.respondent.name} · {r.respondent.email}
+                    </dd>
+                  </>
+                ) : null}
+                <dt className="text-muted">Language</dt>
+                <dd>
+                  {languageName(r.locale)} <span className="text-muted">({r.locale})</span>
+                </dd>
                 {r.contact ? (
                   <>
                     <dt className="text-muted">Contact</dt>

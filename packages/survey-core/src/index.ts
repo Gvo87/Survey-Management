@@ -10,6 +10,7 @@ export * from './factory';
 export * from './display';
 export * from './validate';
 export * from './theme';
+export * from './i18n';
 export type { Condition, ConditionValue, LeafCondition, NavigationRule, Operand } from './types';
 export type {
   ChoiceOption,

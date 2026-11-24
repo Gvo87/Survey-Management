@@ -24,6 +24,10 @@ import { exportJobs } from './exports';
 import { emitEvent } from '../events';
 import { deliverWebhook, dispatchEvent } from './events';
 import { postToSlack, sendNotificationEmail } from './notifications';
+import { recordUsage } from '../lib/usage';
+import { generateInsight } from '../modules/insights';
+import { processPrivacyRequest } from '../modules/privacy';
+import { runRetention } from './retention';
 
 export type JobHandlers = { [Q in QueueName]: (data: JobPayloads[Q]) => Promise<void> };
 
@@ -103,6 +107,8 @@ export function createJobHandlers(deps: Deps): JobHandlers {
     'aggregates.response-completed': async ({ orgId, surveyId, responseId }) => {
       const counted = await withTenant(pool, orgId, async (tx) => {
         const added = await aggregateResponse(tx.client, surveyId, responseId);
+        // Phase 3B usage: counted once per response, here rather than on the submission path.
+        if (added) await recordUsage(tx, orgId, 'responses');
         const { rows } = await tx.client.query<{ completed_count: number }>('select completed_count from surveys where id = $1', [surveyId]);
         return added ? (rows[0]?.completed_count ?? null) : null;
       });
@@ -201,6 +207,10 @@ export function createJobHandlers(deps: Deps): JobHandlers {
     'platform.cleanup': async () => {
       await withGlobal(pool, (tx) => tx.client.query('select purge_platform_records($1)', [new Date()]));
     },
+    // Phase 3B
+    'insights.generate': ({ orgId, insightId }) => generateInsight(deps, orgId, insightId),
+    'retention.purge': async () => void (await runRetention(deps)),
+    'privacy.process': ({ orgId, requestId }) => processPrivacyRequest(deps, orgId, requestId),
     ...campaignJobs(deps),
     ...exportJobs(deps),
   };

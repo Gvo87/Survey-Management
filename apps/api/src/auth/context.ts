@@ -29,6 +29,9 @@ export function registerAuth(app: FastifyInstance, deps: Deps): void {
 
   app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/api/')) return;
+    // Phase 3B: the SAML response is a cross-site form POST from the identity provider. It never acts on an
+    // existing session (it starts a new one), so it skips session loading and the CSRF check.
+    if (req.method === 'POST' && req.url.split('?')[0] === '/api/v1/auth/sso/saml/acs') return;
     const authorization = req.headers.authorization;
     if (authorization?.startsWith('Bearer ')) {
       req.auth = await authenticateApiKey(deps, authorization.slice('Bearer '.length).trim());

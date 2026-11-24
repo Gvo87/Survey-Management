@@ -260,9 +260,7 @@ export function OrgSettingsPage() {
           }}
         >
           <TextField label="Organization name" value={value} onChange={(e) => setName(e.target.value)} />
-          <p className="text-xs text-muted">
-            Plan: {org.data?.plan ?? '-'}. Data retention and SSO arrive in a later phase.
-          </p>
+          <p className="text-xs text-muted">Plan: {org.data?.plan ?? '-'}.</p>
           {save.isSuccess ? <Alert tone="success">Saved.</Alert> : null}
           {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
           <Button
@@ -277,7 +275,98 @@ export function OrgSettingsPage() {
         </form>
       </Card>
       {org.data ? <ApprovalSettings org={org.data} /> : null}
+      {org.data ? <RetentionDefault org={org.data} /> : null}
+      {org.data ? <AiSettings org={org.data} /> : null}
     </>
+  );
+}
+
+/** Phase 3B: how long to keep responses (surveys can override it). */
+function RetentionDefault({ org }: { org: Org }) {
+  const queryClient = useQueryClient();
+  const [keep, setKeep] = useState(org.retention.responsesDays === null);
+  const [days, setDays] = useState(String(org.retention.responsesDays ?? 730));
+  const invalid = !keep && !(Number.isInteger(Number(days)) && Number(days) >= 1 && Number(days) <= 3650);
+  const save = useMutation({
+    mutationFn: () => patch<Org>('/org', { retention: { responsesDays: keep ? null : Number(days) } }),
+    onSuccess: (data) => queryClient.setQueryData(['org'], data),
+  });
+  return (
+    <Card className="mt-6 max-w-xl" title="Data retention">
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!invalid) save.mutate();
+        }}
+      >
+        <Checkbox label="Keep responses until someone deletes them" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+        {!keep ? (
+          <TextField
+            label="Delete responses after (days)"
+            type="number"
+            min={1}
+            max={3650}
+            className="max-w-48"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            error={invalid ? 'Enter a whole number from 1 to 3650.' : undefined}
+            hint="Every night, responses completed (or last active) longer ago than this are deleted for good, with their files. Each survey can set its own period."
+          />
+        ) : null}
+        {save.isSuccess ? <Alert tone="success">Saved.</Alert> : null}
+        {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
+        <Button type="submit" variant="primary" className="self-start" busy={save.isPending} disabled={invalid}>
+          Save retention
+        </Button>
+      </form>
+    </Card>
+  );
+}
+
+/** Phase 3B: AI summaries of open text are off until an admin turns them on here. */
+function AiSettings({ org }: { org: Org }) {
+  const queryClient = useQueryClient();
+  // Shown at once; put back if saving fails.
+  const [enabled, setEnabled] = useState(org.ai.enabled);
+  const save = useMutation({
+    mutationFn: (next: boolean) => patch<Org>('/org', { ai: { enabled: next } }),
+    onSuccess: (data) => queryClient.setQueryData(['org'], data),
+    onError: () => setEnabled(org.ai.enabled),
+  });
+  const ai = org.ai;
+  return (
+    <Card className="mt-6 max-w-xl" title="AI summaries">
+      <div className="flex flex-col gap-3 text-sm">
+        {!ai.available ? (
+          <p className="text-muted">Not available on this platform: no AI provider is configured.</p>
+        ) : (
+          <>
+            <p>
+              Summarize answers to open questions into themes and sentiment, with links to sample answers. Every summary is labelled as AI-generated.
+            </p>
+            <Alert tone="info">
+              When someone asks for a summary, up to a few hundred answers to that question are sent to {ai.provider === 'openai' ? 'OpenAI' : ai.provider} (model{' '}
+              {ai.model}), a third-party processor. Email addresses and phone numbers are removed first, but other details people typed are sent as
+              written. Check this fits your agreements with respondents before turning it on.
+            </Alert>
+            <Checkbox
+              label="Turn on AI summaries for this organization"
+              checked={enabled}
+              onChange={(e) => {
+                setEnabled(e.target.checked);
+                save.mutate(e.target.checked);
+              }}
+            />
+            {save.isSuccess ? <p role="status" className="text-xs text-green-800">{enabled ? 'AI summaries are on.' : 'AI summaries are off.'}</p> : null}
+            <p className="text-xs text-muted">
+              Used this month: {ai.tokensUsedThisMonth.toLocaleString()} of {ai.monthlyTokenCap.toLocaleString()} tokens. The allowance resets on the 1st (UTC).
+            </p>
+          </>
+        )}
+        {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
+      </div>
+    </Card>
   );
 }
 

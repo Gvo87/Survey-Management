@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
-import type { InvitationPreview, Me } from '@survey/contracts';
+import type { InvitationPreview, Me, SsoDiscoverResult } from '@survey/contracts';
 import { ApiError, errorMessage, get, post } from '../api';
 import { useAuth } from '../auth';
 import { Alert, Button, TextField } from '../components/ui';
@@ -52,6 +52,20 @@ function useForm() {
 const safeNext = (next: string | null) =>
   next && next.startsWith('/') && !next.startsWith('//') ? next : '/surveys';
 
+/** Phase 3B: why an SSO sign-in came back to the login page. */
+const SSO_ERRORS: Record<string, string> = {
+  expired: 'That sign-in took too long or was already used. Try again.',
+  domain_not_verified: "Your email address isn't in a domain your organization verified for single sign-on. Ask your admin.",
+  email_not_verified: 'Your identity provider says your email address isn’t verified.',
+  no_email: "Your identity provider didn't send an email address. Ask your IT team.",
+  unknown_connection: 'That single sign-on connection is no longer available.',
+  account_disabled: 'This account is disabled.',
+  idp_denied: 'Sign-in was cancelled at your identity provider.',
+};
+
+/** Start a single sign-on login (a full-page navigation through the API to the identity provider). */
+const startSso = (loginUrl: string, next: string) => window.location.assign(`${loginUrl}?returnTo=${encodeURIComponent(next)}`);
+
 export function LoginPage() {
   const { me, setMe } = useAuth();
   const navigate = useNavigate();
@@ -59,13 +73,33 @@ export function LoginPage() {
   const form = useForm();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [sso, setSso] = useState<SsoDiscoverResult | null>(null);
+  const [ssoMode, setSsoMode] = useState(false);
   if (me) return <Navigate to={safeNext(params.get('next'))} replace />;
+  const next = safeNext(params.get('next'));
+  const ssoError = params.get('sso_error');
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void form.run(async () => {
-      setMe(await post<Me>('/auth/login', { email, password }));
-      navigate(safeNext(params.get('next')), { replace: true });
+      if (ssoMode) {
+        const found = await post<SsoDiscoverResult>('/auth/sso/discover', { email });
+        setSso(found);
+        if (found.connections.length === 1) startSso(found.connections[0]!.loginUrl, next);
+        else if (found.connections.length === 0) throw new Error("Single sign-on isn't set up for that email's domain. Sign in with your password.");
+        return;
+      }
+      try {
+        setMe(await post<Me>('/auth/login', { email, password }));
+        navigate(next, { replace: true });
+      } catch (error) {
+        // Enforced SSO: offer the organization's sign-in instead.
+        if (error instanceof ApiError && error.code === 'sso_required') {
+          setSsoMode(true);
+          setSso({ enforced: true, connections: (error.problem?.connections as SsoDiscoverResult['connections']) ?? [] });
+        }
+        throw error;
+      }
     });
   };
   return (
@@ -81,6 +115,7 @@ export function LoginPage() {
       }
     >
       <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+        {ssoError && !form.error ? <Alert tone="error">{SSO_ERRORS[ssoError] ?? "Single sign-on didn't work. Try again or ask your admin."}</Alert> : null}
         {form.error ? <Alert tone="error">{form.error}</Alert> : null}
         <TextField
           label="Email"
@@ -90,20 +125,36 @@ export function LoginPage() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
-        <TextField
-          label="Password"
-          type="password"
-          autoComplete="current-password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
+        {ssoMode ? null : (
+          <TextField
+            label="Password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        )}
+        {ssoMode && sso && sso.connections.length > 1 ? (
+          <div className="flex flex-col gap-2">
+            {sso.connections.map((c) => (
+              <Button key={c.id} onClick={() => startSso(c.loginUrl, next)}>
+                Continue with {c.name}
+              </Button>
+            ))}
+          </div>
+        ) : null}
         <Button type="submit" variant="primary" busy={form.busy}>
-          Log in
+          {ssoMode ? 'Continue with single sign-on' : 'Log in'}
         </Button>
-        <Link to="/forgot-password" className="text-center text-sm text-brand-600">
-          Forgot your password?
-        </Link>
+        <Button variant="ghost" onClick={() => setSsoMode((m) => !m)}>
+          {ssoMode ? 'Use a password instead' : 'Sign in with SSO'}
+        </Button>
+        {ssoMode ? null : (
+          <Link to="/forgot-password" className="text-center text-sm text-brand-600">
+            Forgot your password?
+          </Link>
+        )}
       </form>
     </AuthLayout>
   );

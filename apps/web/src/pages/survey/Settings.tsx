@@ -69,6 +69,7 @@ export function SurveySettingsPage() {
       ) : null}
 
       {canEdit ? <ThemePicker survey={survey} onSaved={refresh} /> : null}
+      {canEdit ? <RetentionSettings survey={survey} onSaved={refresh} /> : null}
 
       <Collaborators survey={survey} canShare={isOwner} />
       <TeamAccess survey={survey} canShare={isOwner} />
@@ -119,6 +120,62 @@ export function SurveySettingsPage() {
         onConfirm={() => remove.mutate()}
       />
     </div>
+  );
+}
+
+/** Phase 3B: delete this survey's responses after N days (or follow the organization's default). */
+function RetentionSettings({ survey, onSaved }: { survey: SurveyDetail; onSaved: () => void }) {
+  const [mode, setMode] = useState<'default' | 'custom'>(survey.retentionDays === null ? 'default' : 'custom');
+  const [days, setDays] = useState(String(survey.retentionDays ?? 365));
+  const save = useMutation({
+    mutationFn: () => patch(`/surveys/${survey.id}`, { retentionDays: mode === 'default' ? null : Number(days) }),
+    onSuccess: onSaved,
+  });
+  const invalid = mode === 'custom' && !(Number(days) >= 1 && Number(days) <= 3650 && Number.isInteger(Number(days)));
+  const orgDefault = survey.retentionDays === null ? survey.effectiveRetentionDays : null;
+  return (
+    <Card title="Data retention">
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!invalid) save.mutate();
+        }}
+      >
+        <fieldset className="flex flex-col gap-2 text-sm">
+          <legend className="sr-only">How long to keep responses</legend>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="retention" checked={mode === 'default'} onChange={() => setMode('default')} className="accent-brand-600" />
+            Use the organization's setting
+            <span className="text-muted">
+              ({orgDefault ? `delete after ${orgDefault} days` : survey.retentionDays === null ? 'keep responses' : 'set by an admin'})
+            </span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="retention" checked={mode === 'custom'} onChange={() => setMode('custom')} className="accent-brand-600" />
+            Delete responses after a number of days
+          </label>
+        </fieldset>
+        {mode === 'custom' ? (
+          <TextField
+            label="Days to keep responses"
+            type="number"
+            min={1}
+            max={3650}
+            className="max-w-48"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            error={invalid ? 'Enter a whole number from 1 to 3650.' : undefined}
+            hint="Every night, responses completed (or last active) longer ago than this are deleted for good, with their files."
+          />
+        ) : null}
+        {save.isSuccess ? <Alert tone="success">Saved.</Alert> : null}
+        {save.error ? <Alert tone="error">{errorMessage(save.error)}</Alert> : null}
+        <Button type="submit" className="self-start" busy={save.isPending} disabled={invalid}>
+          Save retention
+        </Button>
+      </form>
+    </Card>
   );
 }
 

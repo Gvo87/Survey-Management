@@ -1,9 +1,9 @@
 # Survey Management System: Design Docs
 
-**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phases 1, 2A, 2B and 3A are
-implemented**; see [phase-1-status.md](phase-1-status.md), [phase-2a-status.md](phase-2a-status.md),
-[phase-2b-status.md](phase-2b-status.md) and [phase-3a-status.md](phase-3a-status.md) for each acceptance
-criterion and its evidence. Phase 3B is next.
+**Status:** approved on 2026-11-23 with the default answers to the open questions. **Phases 1, 2A, 2B, 3A and 3B
+are implemented**; see [phase-1-status.md](phase-1-status.md), [phase-2a-status.md](phase-2a-status.md),
+[phase-2b-status.md](phase-2b-status.md), [phase-3a-status.md](phase-3a-status.md) and
+[phase-3b-status.md](phase-3b-status.md) for each acceptance criterion and its evidence.
 
 | # | Document | Contents |
 |---|---|---|
@@ -16,6 +16,7 @@ criterion and its evidence. Phase 3B is next.
 | - | [Phase 2A status](phase-2a-status.md) | Every Phase 2A acceptance criterion, plus where the build deviates from the design |
 | - | [Phase 2B status](phase-2b-status.md) | Every Phase 2B acceptance criterion, plus where the build deviates from the design |
 | - | [Phase 3A status](phase-3a-status.md) | Every Phase 3A acceptance criterion, plus where the build deviates from the design |
+| - | [Phase 3B status](phase-3b-status.md) | Every Phase 3B acceptance criterion, plus where the build deviates from the design |
 | - | [Public API and webhooks](public-api.md) | API keys, scopes, rate limits, idempotency, webhook signatures, retries and a sample verifier |
 | - | [Accessibility record](a11y-p1.md) | Automated WCAG checks done; manual screen-reader checklist |
 
@@ -54,7 +55,8 @@ The brief's placeholders weren't filled in, so these are my defaults. Each can b
 
 ## Open questions
 
-Q1, Q2, Q3, Q7 and Q8 were answered with the defaults on 2026-11-23. The rest are still open.
+Q1, Q2, Q3, Q7 and Q8 were answered with the defaults on 2026-11-23, and Q5 and Q10 on 2026-11-24 (below). Q4, Q6
+and Q9 are still open.
 
 **Answered (defaults accepted):**
 
@@ -67,12 +69,24 @@ Q1, Q2, Q3, Q7 and Q8 were answered with the defaults on 2026-11-23. The rest ar
 - **Q7 Quotas and close dates:** let respondents already in progress finish (default), or cut them off strictly?
 - **Q8 Analyst visibility:** analysts see only surveys shared with them (default), or every org survey read-only?
 
-**Needed before later phases** (Q5 and Q10 affect Phase 3B only; 3A needed none):
+**Answered for Phase 3B (2026-11-24):**
+
+- **Q5 Login-required respondents: org members only.** A survey can require respondents to be signed-in members of
+  the survey's organization, through the existing login or SSO. The member is stored in
+  `responses.respondent_user_id`, one response per member. Anonymous surveys can't require login (a database trigger
+  already refuses identifying columns on them). People outside the organization keep using personal campaign links;
+  there's no magic-link identity. Because the respondent app runs on another origin, the admin app hands signed-in
+  members back with a two-minute, single-use signed token in the URL fragment
+  ([architecture §1.5](01-architecture.md#15-authentication-and-authorization)).
+- **Q10 AI provider: OpenAI, opt-in per org** (this replaces the earlier suggestion of Anthropic Claude). The
+  provider sits behind a small interface with a deterministic fake for tests. `OPENAI_API_KEY` and `OPENAI_MODEL`
+  (default `gpt-6-luna`) configure it; without a key the feature shows as unavailable. **Response text goes to
+  OpenAI, a third-party processor**, after emails and phone numbers are removed: organizations need it in their
+  data processing agreements, and an org admin must opt in.
+
+**Still open:**
 
 - **Q4 Infrastructure:** when should production infrastructure as code (Terraform or CDK) land, and is AWS right?
-- **Q5 Login-required respondents:** who logs in? Org members (cheap: reuse login or SSO) or external people
-  (expensive: magic-link identity)?
 - **Q6 Billing:** out of scope for all three phases?
 - **Q9 Phase 2 split:** OK to split Phase 2 into 2A (builder power) then 2B (email, embed, advanced analytics)?
   Or swap the order?
-- **Q10 AI provider:** Anthropic Claude via API for Phase 3 summaries, opt-in per org?

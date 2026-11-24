@@ -32,6 +32,12 @@ export interface JobPayloads {
   'webhooks.deliver': { orgId: string; deliveryId: string; manual?: boolean };
   'integrations.slack': { orgId: string; text: string };
   'platform.cleanup': Record<string, never>;
+  /** Phase 3B: an AI summary of one open-text question. */
+  'insights.generate': { orgId: string; insightId: string };
+  /** Phase 3B: daily retention purge across orgs (and soft-deleted surveys after 30 days). */
+  'retention.purge': Record<string, never>;
+  /** Phase 3B: a subject export or erasure. */
+  'privacy.process': { orgId: string; requestId: string };
 }
 
 /**
