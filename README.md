@@ -35,7 +35,7 @@ Developers integrating with the platform start at
 
 **You need:**
 
-- Node.js 22.12+ (24 recommended)
+- Node.js 22.19+ (24 recommended; the Lighthouse check needs 22.19)
 - Docker Desktop, running
 - pnpm 10, which ships with Node via corepack
 
